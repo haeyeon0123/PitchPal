@@ -1,17 +1,28 @@
+import whisper
 import librosa
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
+import difflib
 
-# 오디오 파일 로드
-def load_audio(file_path):
-    audio, sr = librosa.load(file_path, sr=16000)
+# Whisper 모델 로드
+whisper_model = whisper.load_model("small")
+
+# 음성 파일을 텍스트로 변환
+def transcribe_audio(audio_path):
+    result = whisper_model.transcribe(audio_path)
+    return result["text"]
+
+# Librosa로 음성 특성 분석
+def load_audio(audio_path):
+    audio, sr = librosa.load(audio_path, sr=16000)
     return audio, sr
 
 # MFCC 특징 추출
 def extract_mfcc(audio, sr):
     mfccs = librosa.feature.mfcc(y=audio, sr=sr, n_mfcc=13)
     mfccs_mean = np.mean(mfccs.T, axis=0)
-    return mfccs_mean
+    mfccs_std = np.std(mfccs.T, axis=0)
+    return mfccs_mean, mfccs_std
 
 # Pitch(억양) 특징 추출
 def extract_pitch(audio, sr):
@@ -20,66 +31,56 @@ def extract_pitch(audio, sr):
     if len(pitch_values) == 0:
         return np.array([0])
     pitch_mean = np.mean(pitch_values)
-    return np.array([pitch_mean])
+    pitch_std = np.std(pitch_values)
+    return pitch_mean, pitch_std
 
-# 속도(WPM) 추정 (오디오 길이 기반 단순 추정)
-def estimate_wpm(audio_duration_sec, estimated_word_count=150):
-    """
-    사용자가 약 estimated_word_count 단어를 발화했다고 가정하고,
-    WPM을 추정하는 함수입니다.
-    """
-    wpm = (estimated_word_count / audio_duration_sec) * 60
+# 속도(WPM) 추정
+def estimate_wpm(audio_path, transcript):
+    audio, sr = librosa.load(audio_path, sr=16000)
+    audio_duration_sec = librosa.get_duration(y=audio, sr=sr)
+    word_count = len(transcript.split())
+    wpm = (word_count / audio_duration_sec) * 60
     return wpm
 
-# 특징 비교 (코사인 유사도)
-def compare_features(feature1, feature2):
-    similarity = cosine_similarity([feature1], [feature2])[0][0]
-    return similarity
+# 발음 정확도 평가
+def evaluate_pronunciation(user_text, model_text):
+    sequence = difflib.SequenceMatcher(None, user_text, model_text)
+    return sequence.ratio()
 
-# 전체 평가
-def speech_evaluate(user_audio_path):
-    print("오디오 불러오기")
-    user_audio, sr = load_audio(user_audio_path)
+# 전체 음성 분석
+def analyze_speech(audio_path, target_wpm=140, model_text="이것은 예시 텍스트입니다."):
+    # 텍스트 변환 (Whisper)
+    transcript = transcribe_audio(audio_path)
+    print(f"Transcript: {transcript}")
 
-    print("MFCC(발음 특성) 추출")
-    user_mfcc = extract_mfcc(user_audio, sr)
-
-    print("Pitch(억양 특성) 추출")
-    user_pitch = extract_pitch(user_audio, sr)
-
-    print("속도 계산 (WPM)")
-    duration_sec = librosa.get_duration(filename=user_audio_path)
-    user_wpm = estimate_wpm(duration_sec)
-
-    # =========================
-    # 기준값 (모델) 설정 부분
-    # =========================
-    model_mfcc = np.random.normal(0, 1, 13)  # 예시 기준 MFCC
-    model_pitch = np.array([150])            # 평균 pitch 기준값 예시 (Hz)
-    target_wpm = 140                         # 목표 발화 속도 (WPM)
-    # =========================
-
-    print("발음 유사도 평가 (MFCC)")
-    mfcc_similarity = compare_features(user_mfcc, model_mfcc)
-    print(f" - 발음 유사도 점수: {mfcc_similarity:.2f}")
-
-    print("억양 유사도 평가 (Pitch)")
-    pitch_similarity = compare_features(user_pitch, model_pitch)
-    print(f" - 억양 유사도 점수: {pitch_similarity:.2f}")
-
-    print("속도 비교 (Words Per Minute)")
-    print(f" - 사용자 WPM 추정값: {user_wpm:.2f}")
-    print(f" - 목표 WPM: {target_wpm}")
-
-    print("\n최종 평가 결과")
-    if mfcc_similarity > 0.85 and pitch_similarity > 0.85 and abs(user_wpm - target_wpm) < 30:
-        print("발음, 억양, 속도 모두 매우 우수합니다!")
-    elif mfcc_similarity > 0.7:
-        print("좋은 발표입니다! 약간 다듬으면 완벽해요.")
+    # 음성 분석 (Librosa)
+    audio, sr = load_audio(audio_path)
+    mfcc_mean, mfcc_std = extract_mfcc(audio, sr)
+    pitch_mean, pitch_std = extract_pitch(audio, sr)
+    wpm = estimate_wpm(audio_path, transcript)
+    
+    print(f"MFCC Features (Mean): {mfcc_mean}")
+    print(f"MFCC Features (STD): {mfcc_std}")
+    print(f"Pitch Features (Mean): {pitch_mean}")
+    print(f"Pitch Features (STD): {pitch_std}")
+    print(f"Words Per Minute: {wpm:.2f}")
+    
+    # 발음 정확도 평가
+    pronunciation_accuracy = evaluate_pronunciation(transcript, model_text)
+    print(f"Pronunciation Accuracy: {pronunciation_accuracy:.2f}")
+    
+    # MFCC 평균이 0.3 이상이면 발음이 안정적
+    # Pitch 평균이 80 Hz 이상이면 억양이 자연스럽
+    # WPM이 100 이상이면 속도가 적당
+    if np.mean(mfcc_mean) > 0.3 and pitch_mean > 80 and wpm > 100 and pronunciation_accuracy > 0.7:
+        print("발음, 억양, 속도 모두 잘 조화되어 있습니다! 발표가 자연스럽습니다.")
+    elif np.mean(mfcc_mean) > 0.2:
+        print("발음은 좋습니다! 억양과 속도를 더 조정하면 좋겠습니다.")
+    elif pronunciation_accuracy > 0.6:
+        print("발음은 좋은 편입니다! 다만 억양과 속도를 더 자연스럽게 조정할 필요가 있습니다.")
     else:
-        print("추가 연습이 필요합니다. 발음과 억양을 개선해봅시다.")
+        print("발음, 억양, 속도에 더 많은 연습이 필요합니다.")
 
-# 사용 예시
-if __name__ == "__main__":
-    user_audio_path = "data/sample.wav"  # 샘플 음성 파일
-    speech_evaluate(user_audio_path)
+# 예시 음성 파일 경로
+audio_path = "data/sample.wav"
+analyze_speech(audio_path)
