@@ -3,3 +3,5 @@ torchaudio
 librosa
 numpy
 matplotlib
+SpeechRecognition
+fastapi
