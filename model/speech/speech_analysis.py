@@ -54,7 +54,7 @@ def speech_evaluate(user_audio_path):
     # =========================
     # 기준값 (모델) 설정 부분
     # =========================
-    model_mfcc = np.random.normal(0, 1, 13)  # 예시 기준 MFCC (추후 실제 데이터로 교체)
+    model_mfcc = np.random.normal(0, 1, 13)  # 예시 기준 MFCC
     model_pitch = np.array([150])            # 평균 pitch 기준값 예시 (Hz)
     target_wpm = 140                         # 목표 발화 속도 (WPM)
     # =========================

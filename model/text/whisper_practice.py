@@ -6,7 +6,7 @@ from collections import Counter
 model = whisper.load_model('base')
 
 # 음성 파일 경로 설정
-file_path = "C:/Users/lhy27/Downloads/sample.wav"
+file_path = "data/sample.wav"
 
 # 불필요한 단어/추임새 리스트 작성
 filler_words = ["어", "음", "아", "흠", "그니까", "그러니까", "뭐랄까", "이제", "약간", "뭐지", "그러면"]

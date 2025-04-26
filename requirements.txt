@@ -5,3 +5,7 @@ numpy
 matplotlib
 SpeechRecognition
 fastapi
+git+https://github.com/openai/whisper.git
+ffmpeg-python
+uvicorn
+python-multipart
