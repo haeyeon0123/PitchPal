@@ -69,18 +69,18 @@ def analyze_speech(audio_path, target_wpm=140, model_text="이것은 예시 텍�
     pronunciation_accuracy = evaluate_pronunciation(transcript, model_text)
     print(f"Pronunciation Accuracy: {pronunciation_accuracy:.2f}")
     
-    # MFCC 평균이 0.3 이상이면 발음이 안정적
-    # Pitch 평균이 80 Hz 이상이면 억양이 자연스럽
-    # WPM이 100 이상이면 속도가 적당
-    if np.mean(mfcc_mean) > 0.3 and pitch_mean > 80 and wpm > 100 and pronunciation_accuracy > 0.7:
+    # MFCC 평균이 0.2 이상이면 발음이 안정적
+    # Pitch 평균이 70 Hz 이상이면 억양이 자연스럽
+    # WPM이 90 이상이면 속도가 적당
+    if np.mean(mfcc_mean) > 0.2 and pitch_mean > 70 and wpm > 90 and pronunciation_accuracy > 0.6:
         print("발음, 억양, 속도 모두 잘 조화되어 있습니다! 발표가 자연스럽습니다.")
-    elif np.mean(mfcc_mean) > 0.2:
+    elif np.mean(mfcc_mean) > 0.1:
         print("발음은 좋습니다! 억양과 속도를 더 조정하면 좋겠습니다.")
-    elif pronunciation_accuracy > 0.6:
-        print("발음은 좋은 편입니다! 다만 억양과 속도를 더 자연스럽게 조정할 필요가 있습니다.")
+    elif pronunciation_accuracy > 0.5:
+        print("발음은 괜찮은 편입니다! 억양과 속도를 자연스럽게 조정해보세요.")
     else:
         print("발음, 억양, 속도에 더 많은 연습이 필요합니다.")
 
 # 예시 음성 파일 경로
-audio_path = "data/sample.wav"
+audio_path = "data/sample2.wav"
 analyze_speech(audio_path)
