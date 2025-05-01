@@ -48,7 +48,7 @@ def evaluate_pronunciation(user_text, model_text):
     return sequence.ratio()
 
 # 전체 음성 분석
-def analyze_speech(audio_path, target_wpm=140, model_text="이것은 예시 텍스트입니다."):
+def analyze_speech(audio_path, target_wpm=140, model_text="성함이 어떻게 되세요?"): # 예시 텍스트
     # 텍스트 변환 (Whisper)
     transcript = transcribe_audio(audio_path)
     print(f"Transcript: {transcript}")
@@ -82,5 +82,5 @@ def analyze_speech(audio_path, target_wpm=140, model_text="이것은 예시 텍�
         print("발음, 억양, 속도에 더 많은 연습이 필요합니다.")
 
 # 예시 음성 파일 경로
-audio_path = "data/sample2.wav"
+audio_path = "data/sample.wav"
 analyze_speech(audio_path)
