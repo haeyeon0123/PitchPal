@@ -1,4 +1,5 @@
 from soynlp.normalizer import repeat_normalize
+import openai
 
 # 1. 맞춤법 교정 함수
 def correct_spelling(text):
@@ -37,11 +38,11 @@ def main():
             break
         user_input += line.strip() + " "
 
-    print("\n📌 맞춤법 및 문법 교정 결과:")
+    print("\n맞춤법 및 문법 교정 결과:")
     corrected = correct_spelling(user_input)
     print(corrected)
 
-    print("\n🔄 ChatGPT가 제안한 자연스러운 표현:")
+    print("\n자연스러운 표현:")
     improved = rewrite_with_chatgpt(corrected)
     print(improved)
 
