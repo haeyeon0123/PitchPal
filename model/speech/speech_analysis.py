@@ -82,5 +82,5 @@ def analyze_speech(audio_path, target_wpm=140, model_text="성함이 어떻게 �
         print("발음, 억양, 속도에 더 많은 연습이 필요합니다.")
 
 # 예시 음성 파일 경로
-audio_path = "data/sample.wav"
+audio_path = "data/sample.wav" # 사용자 음성 입력
 analyze_speech(audio_path)

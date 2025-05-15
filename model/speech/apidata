@@ -1,0 +1,33 @@
+import urllib3
+import json
+import base64
+
+openApiURL = "http://aiopen.etri.re.kr:8000/WiseASR/PronunciationKor" # 한국어
+accessKey = "c514ead2-aadb-402b-8ee7-1b231bdabc20"
+audioFilePath = "data/sample.wav" # 사용자 음성 입력
+languageCode = "korean"
+script = "성함이 어떻게 되세요?" # 사용자 대본 입력
+   
+file = open(audioFilePath, "rb")
+audioContents = base64.b64encode(file.read()).decode("utf8")
+file.close()
+   
+requestJson = {   
+    "argument": {
+        "language_code": languageCode,
+        "script": script,
+        "audio": audioContents
+    }
+}
+   
+http = urllib3.PoolManager()
+response = http.request(
+    "POST",
+    openApiURL,
+    headers={"Content-Type": "application/json; charset=UTF-8","Authorization": accessKey},
+    body=json.dumps(requestJson)
+)
+   
+print("[responseCode] " + str(response.status))
+print("[responBody]")
+print(str(response.data,"utf-8"))
