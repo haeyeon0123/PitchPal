@@ -174,7 +174,7 @@ duration_str = f"{int(total_time_sec // 60)}분 {int(total_time_sec % 60)}초"
 df = pd.DataFrame(results)
 df.loc[0, "눈 깜빡임 빈도(Hz)"] = round(blink_count / total_time_sec, 2)
 
-csv_path = "C:/Users/lhy27/Desktop/analysis_results.csv"
+csv_path = "C:/Users/lhy27/Desktop/eye_blink_analysis_results.csv"
 df.to_csv(csv_path, index=False, encoding='utf-8-sig')
 
 # --- 🔻 평가 및 요약 ---
@@ -197,6 +197,6 @@ print(f"EAR: {avg_ear:.4f}")
 
 # CSV 저장
 summary_df = pd.DataFrame([summary])
-summary_path = "C:/Users/lhy27/Desktop/analysis_summary.csv"
+summary_path = "C:/Users/lhy27/Desktop/eye_blink_analysis_summary.csv"
 summary_df.to_csv(summary_path, index=False, encoding="utf-8-sig")
 print(f"\n✅ 평가 요약 결과가 '{summary_path}' 에 저장되었습니다.")
