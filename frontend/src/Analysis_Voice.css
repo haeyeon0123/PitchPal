@@ -1,0 +1,69 @@
+/* 음성 분석 페이지: 분석진행바&재생바 색 설정 */
+
+/* Chrome, Edge, Safari */
+progress.custom-progress::-webkit-progress-value {
+  background-color: #3EB489 !important;
+}
+
+/* Firefox */
+progress.custom-progress::-moz-progress-bar {
+  background-color: #3EB489 !important;
+}
+
+/* 재생바 채워진 부분과 썸 색상을 #3EB489으로 변경 */
+input[type="range"] {
+  accent-color: #3EB489;
+}
+
+/* 1) 전체 기본 설정 */
+input[type="range"] {
+  accent-color: #3EB489;  /* 채워진 부분 색상 */
+  outline: none;          /* 포커스 시 생기는 외곽선 제거(선택사항) */
+}
+
+/* 2) WebKit 계열 (Chrome, Safari, Edge) */
+/* 트랙(미채워진 부분) */
+input[type="range"]::-webkit-slider-runnable-track {
+  background: #E5E7EB;    /* 연한 회색(#E5E7EB) */
+  border: none;           /* 테두리 제거 */
+  height: 4px;            /* 트랙 높이 조절(필요시) */
+  border-radius: 2px;     /* 모서리 둥글게 */
+}
+
+/* 채워진 부분 (progress) */
+input[type="range"]::-webkit-slider-thumb {
+  background: #3EB489;    /* thumb 색상 (accent-color와 동일) */
+  border: none;           /* 테두리 제거 */
+  width: 16px;            /* thumb 크기 조절 */
+  height: 16px;
+  margin-top: -6px;       /* 트랙 중앙에 위치하도록 보정 */
+  border-radius: 50%;
+  cursor: pointer;
+}
+
+/* 3) Firefox */
+/* 트랙(미채워진 부분) */
+input[type="range"]::-moz-range-track {
+  background: #E5E7EB;
+  border: none;
+  height: 4px;
+  border-radius: 2px;
+}
+
+/* 채워진 부분 */
+input[type="range"]::-moz-range-progress {
+  background: #3EB489;
+  border: none;
+  height: 4px;
+  border-radius: 2px;
+}
+
+/* thumb */
+input[type="range"]::-moz-range-thumb {
+  background: #3EB489;
+  border: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  cursor: pointer;
+}
