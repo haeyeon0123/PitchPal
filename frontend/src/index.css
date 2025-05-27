@@ -1,0 +1,8 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* (선택) 전역 antialias만 적용 */
+body {
+  @apply antialiased;
+}

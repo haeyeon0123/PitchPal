@@ -1,0 +1,11 @@
+/* 영상 분석 페이지: 분석진행바 색 설정 */
+
+/* Chrome, Edge, Safari */
+progress.custom-progress::-webkit-progress-value {
+  background-color: #3EB489 !important;
+}
+
+/* Firefox */
+progress.custom-progress::-moz-progress-bar {
+  background-color: #3EB489 !important;
+}
