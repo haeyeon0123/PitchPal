@@ -61,7 +61,7 @@ start_time = time.time()
 results = []
 
 # 영상 경로 설정
-video_path = r"C:\Users\lhy27\Desktop\KakaoTalk_20250522_165528571.mp4"
+video_path = r"C:\Users\lhy27\Desktop\졸프\20250522_154521.mp4"
 
 # 영상 열기
 cap = cv2.VideoCapture(video_path)
@@ -75,7 +75,7 @@ if fps == 0:
     exit()
 
 # 깜빡임 데이터 CSV 준비
-blink_csv_path = "C:/Users/lhy27/Desktop/blink_data.csv"
+blink_csv_path = r"model\video\blink_data.csv"
 blink_csv = open(blink_csv_path, mode='w', newline='', encoding='utf-8-sig')
 csv_writer = csv.writer(blink_csv)
 csv_writer.writerow(['Blink Number', 'Timestamp (s)', 'Formatted Time'])
@@ -174,7 +174,7 @@ duration_str = f"{int(total_time_sec // 60)}분 {int(total_time_sec % 60)}초"
 df = pd.DataFrame(results)
 df.loc[0, "눈 깜빡임 빈도(Hz)"] = round(blink_count / total_time_sec, 2)
 
-csv_path = "C:/Users/lhy27/Desktop/eye_blink_analysis_results.csv"
+csv_path = r"model\video\blink_data.csv"
 df.to_csv(csv_path, index=False, encoding='utf-8-sig')
 
 # --- 🔻 평가 및 요약 ---
@@ -197,6 +197,6 @@ print(f"EAR: {avg_ear:.4f}")
 
 # CSV 저장
 summary_df = pd.DataFrame([summary])
-summary_path = "C:/Users/lhy27/Desktop/eye_blink_analysis_summary.csv"
+summary_path = r"model\video\eye_blink_analysis_summary.csv"
 summary_df.to_csv(summary_path, index=False, encoding="utf-8-sig")
 print(f"\n✅ 평가 요약 결과가 '{summary_path}' 에 저장되었습니다.")
