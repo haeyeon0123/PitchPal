@@ -46,6 +46,8 @@ def classify_pitch(pitch_deg):
 results_data = []
 frame_count = 0
 head_pose_counts = {"looking up":0, "looking front":0, "looking down":0}
+warning_needed = False
+last_frame_with_warning = None
 
 while cap.isOpened():
     success, frame = cap.read()
@@ -111,32 +113,36 @@ while cap.isOpened():
     if head_pose_text in head_pose_counts:
         head_pose_counts[head_pose_text] += 1
 
-    # 마지막 프레임에 경고 문구 출력 및 3초간 화면 유지
-    if frame_count == total_frames - 1:
-        total = sum(head_pose_counts.values())
-        if total > 0:
-            ratio_looking_down = head_pose_counts["looking down"] / total
-            ratio_looking_front = head_pose_counts["looking front"] / total
-            ratio_looking_up = head_pose_counts["looking up"] / total
+    frame_count += 1
+    cv2.imshow("Head Pose Detection", frame)
 
-            if ratio_looking_down > ratio_looking_front and ratio_looking_down > ratio_looking_up:
-                warning_msg = "You're looking down too much."
-                print(warning_msg)
-                cv2.putText(frame, warning_msg, (30, 150), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0,0,255), 3)
-
-        cv2.imshow("Head Pose Detection (solvePnP)", frame)
-        cv2.waitKey(3000)  # 3초 대기
-        break
-
-    cv2.imshow("Head Pose Detection (solvePnP)", frame)
     if cv2.waitKey(int(1000/fps)) & 0xFF == ord('q'):
         break
 
-    frame_count += 1
+    if frame_count == total_frames:
+        total = sum(head_pose_counts.values())
+        if total > 0:
+            down_ratio = head_pose_counts["looking down"] / total
+            front_ratio = head_pose_counts["looking front"] / total
+            up_ratio = head_pose_counts["looking up"] / total
+            if down_ratio > front_ratio and down_ratio > up_ratio:
+                warning_needed = True
+                warning_msg = "You're looking down too much."
+                print(warning_msg)
+                cv2.putText(frame, warning_msg, (30, 150), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
+                last_frame_with_warning = frame.copy()
+
+        break
 
 cap.release()
-cv2.destroyAllWindows()
 face_mesh.close()
+
+# 경고 문구 출력 시 3초간 영상 재생 화면 대기
+if warning_needed and last_frame_with_warning is not None:
+    cv2.imshow("Head Pose Detection", last_frame_with_warning)
+    cv2.waitKey(3000)
+
+cv2.destroyAllWindows()
 
 df = pd.DataFrame(results_data)
 df.to_csv(CSV_OUTPUT_PATH, index=False)
