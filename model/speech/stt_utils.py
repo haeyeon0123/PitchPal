@@ -13,8 +13,8 @@ def remove_punctuation(text):
 def transcribe_audio(audio_path):
     result = whisper_model.transcribe(
         audio_path,
-        temperature=0.3,  # 디폴트는 0.0~1.0 사이. 낮출수록 반복 줄고 보수적으로 동작
-        language="ko"
+        #temperature=0.3,  # 디폴트는 0.0~1.0 사이. 낮출수록 반복 줄고 보수적으로 동작
+        #language="ko"
     )
     return result["text"]
 
