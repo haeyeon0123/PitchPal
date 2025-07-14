@@ -2,48 +2,63 @@ from faster_whisper import WhisperModel
 import difflib
 import string
 
-# 모델 로드: 필요한 경우 device="cuda", compute_type="float16"
+# 모델 로드
 model = WhisperModel("medium", device="cpu", compute_type="int8")
 
-# 음성 파일을 텍스트로 변환
-def transcribe_audio(audio_path):
-    segments, _ = model.transcribe(audio_path)
-    return " ".join([seg.text.strip() for seg in segments])
+# 정제 함수: 문장부호 + 공백 제거
+def clean_text(text):
+    return text.translate(str.maketrans("", "", string.punctuation + " ")).lower()
 
-# 비교용: 공백 및 문장부호 제거
-def clean_text_for_comparison(text):
-    no_punct = text.translate(str.maketrans("", "", string.punctuation))
-    no_space = no_punct.replace(" ", "")
-    return no_space.lower()
+# 텍스트를 단어 리스트로 분할하고 각 단어의 정제된 형태도 같이 반환
+def tokenize(text):
+    words = text.split()
+    cleaned_words = [clean_text(w) for w in words]
+    return words, cleaned_words
 
-# 유사도 평가
-def evaluate_pronunciation(user_text, model_text):
-    user_clean = clean_text_for_comparison(user_text)
-    model_clean = clean_text_for_comparison(model_text)
-    sequence = difflib.SequenceMatcher(None, user_clean, model_clean)
-    return sequence.ratio()
+# 정제된 텍스트 비교
+def evaluate_pronunciation(text1, text2):
+    return difflib.SequenceMatcher(None, clean_text(text1), clean_text(text2)).ratio()
 
-# 시각화 출력: 문장 부호 및 공백은 유지
+# 차이 강조 출력
 def highlight_differences(ref_text, stt_text):
-    ref_words = ref_text.split()
-    stt_words = stt_text.split()
+    ref_words, ref_cleaned = tokenize(ref_text)
+    stt_words, stt_cleaned = tokenize(stt_text)
 
-    diff = list(difflib.ndiff(ref_words, stt_words))
+    # 정제된 단어들을 이어 붙여 전체 비교용 텍스트 생성
+    ref_joined = "".join(ref_cleaned)
+    stt_joined = "".join(stt_cleaned)
 
-    ref_highlighted = []
-    stt_highlighted = []
+    # difflib로 문자 단위 비교 수행
+    sm = difflib.SequenceMatcher(None, ref_joined, stt_joined)
+    opcodes = sm.get_opcodes()
 
-    for d in diff:
-        code = d[:2]
-        word = d[2:]
+    # 차이 위치를 기록할 index set 생성
+    ref_diff_indices = set()
+    stt_diff_indices = set()
 
-        if code == "  ":
-            ref_highlighted.append(word)
-            stt_highlighted.append(word)
-        elif code == "- ":
-            ref_highlighted.append(f"\033[91m{word}\033[0m")  # 빨간색
-        elif code == "+ ":
-            stt_highlighted.append(f"\033[94m{word}\033[0m")  # 파란색
+    for tag, i1, i2, j1, j2 in opcodes:
+        if tag != "equal":
+            ref_diff_indices.update(range(i1, i2))
+            stt_diff_indices.update(range(j1, j2))
+
+    # 정제된 단어들의 문자 길이 누적
+    def mark_diffs(words, cleaned_words, diff_indices):
+        result = []
+        idx_counter = 0
+        for word, cleaned in zip(words, cleaned_words):
+            word_len = len(cleaned)
+            word_indices = set(range(idx_counter, idx_counter + word_len))
+            if word_indices & diff_indices:
+                # 차이가 있는 단어
+                result.append(f"\033[91m{word}\033[0m")  # 빨간색
+            else:
+                result.append(word)
+            idx_counter += word_len
+        return result
+
+    # 강조 적용
+    ref_highlighted = mark_diffs(ref_words, ref_cleaned, ref_diff_indices)
+    stt_highlighted = mark_diffs(stt_words, stt_cleaned, stt_diff_indices)
 
     print("\n[원문 텍스트 (차이 강조)]")
     print(" ".join(ref_highlighted))
@@ -51,7 +66,12 @@ def highlight_differences(ref_text, stt_text):
     print("\n[STT 결과 텍스트 (차이 강조)]")
     print(" ".join(stt_highlighted))
 
-# 파일 경로
+# STT 수행
+def transcribe_audio(audio_path):
+    segments, _ = model.transcribe(audio_path)
+    return " ".join([seg.text.strip() for seg in segments])
+
+# 경로 설정
 audio_path = "data/pitch_sample.m4a"
 script_path = "data/pitch_sample_script.txt"
 
@@ -62,9 +82,9 @@ with open(script_path, 'r', encoding='utf-8') as f:
 # STT 수행
 transcribed_text = transcribe_audio(audio_path)
 
-# 유사도 계산
-similarity_score = evaluate_pronunciation(transcribed_text, reference_text)
+# 유사도 점수 출력
+similarity = evaluate_pronunciation(reference_text, transcribed_text)
+print("\n✅ 발음 유사도 점수 (공백 및 문장 부호 무시): {:.2f}%".format(similarity * 100))
 
-# 출력
-print("\n✅ 발음 유사도 점수 (공백 및 문장 부호 무시): {:.2f}%".format(similarity_score * 100))
+# 시각화 출력
 highlight_differences(reference_text, transcribed_text)
