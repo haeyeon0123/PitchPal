@@ -1,14 +1,14 @@
-import whisper
+from faster_whisper import WhisperModel
 import difflib
 import string
 
-# Whisper 모델 로드
-whisper_model = whisper.load_model("medium")
+# 모델 로드: 필요한 경우 device="cuda", compute_type="float16"
+model = WhisperModel("medium", device="cpu", compute_type="int8")
 
 # 음성 파일을 텍스트로 변환
 def transcribe_audio(audio_path):
-    result = whisper_model.transcribe(audio_path)
-    return result["text"]
+    segments, _ = model.transcribe(audio_path)
+    return " ".join([seg.text.strip() for seg in segments])
 
 # 비교용: 공백 및 문장부호 제거
 def clean_text_for_comparison(text):
