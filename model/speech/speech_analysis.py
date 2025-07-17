@@ -1,6 +1,6 @@
 import librosa
 import numpy as np
-from stt_pronounciation import transcribe_audio, evaluate_pronunciation, highlight_differences
+from model.speech.stt_pronunciation import transcribe_audio, evaluate_pronunciation, export_differences_to_html
 from speech_analysis_visualization import plot_mfcc_features, plot_pitch_summary,plot_summary_metrics
 
 # 음성 불러오기
@@ -41,22 +41,24 @@ def estimate_wpm_precise(audio, sr, transcript):
     wpm = (word_count / active_speech_duration_sec) * 60
     return wpm
 
-# 음성 전체 분석 실행
-def analyze_speech(audio_path, script_path, target_wpm=140):
-    with open(script_path, "r", encoding="utf-8") as f:
-        script = f.read().strip()
+# 음성 전체 분석 및 STT 변환 실행
+def analyze_speech(audio_path, reference_text_path, target_wpm=140):
+
+    with open(reference_text_path, 'r', encoding='utf-8') as f:
+        reference_text = f.read()
 
     # STT 수행
-    transcript = transcribe_audio(audio_path)
-    print(f"\n[STT 변환 결과]\n{transcript}\n")
+    stt_text = transcribe_audio(audio_path)
+    #print(f"\n[STT 변환 결과]\n{stt_text}\n")
 
+    # 음성 분석 수행
     audio, sr = load_audio(audio_path)
     mfcc_mean, mfcc_std = extract_mfcc(audio, sr)
     pitch_mean, pitch_std = extract_pitch(audio, sr)
-    precise_wpm = estimate_wpm_precise(audio, sr, transcript)
-    filler_count = detect_filler_words(transcript)
+    precise_wpm = estimate_wpm_precise(audio, sr, stt_text)
+    filler_count = detect_filler_words(stt_text)
 
-    # 분석 출력
+    # 분석 결과 출력
     print(f"[음성 분석 결과]")
     print(f"MFCC Features (Mean): {mfcc_mean}")
     print(f"MFCC Features (STD): {mfcc_std}")
@@ -65,12 +67,12 @@ def analyze_speech(audio_path, script_path, target_wpm=140):
     print(f"Words Per Minute (정밀): {precise_wpm:.2f}")
     print(f"추임새 사용 횟수: {filler_count}회")
 
-    # 유사도 점수 출력
-    pronunciation_accuracy = evaluate_pronunciation(script, transcript)
-    print("\n✅ 발음 유사도 점수 (공백 및 문장 부호 무시): {:.2f}%".format(pronunciation_accuracy * 100))
+    # STT와 대본을 비교하여 발음 정확도 계산
+    pronunciation_accuracy = evaluate_pronunciation(reference_text, stt_text)
+    print(f"\n✅ 발음 유사도 점수 (공백 및 문장 부호 무시): {pronunciation_accuracy * 100:.2f}%")
 
-    # 차이 시각화 출력
-    highlight_differences(script, transcript)
+    output_html_path = "data/stt_results.html" # 결과를 해당 csv 파일 경로에 저장
+    export_differences_to_html(reference_text, stt_text, output_html_path)
 
     # 분석 후 결과 시각화
     plot_mfcc_features(mfcc_mean, mfcc_std)
