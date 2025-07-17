@@ -1,4 +1,6 @@
 # PitchPal
+
+# Backend 설치 및 실행
 pip install -r requirement.txt
 uvicorn backend.main:app --reload
 
