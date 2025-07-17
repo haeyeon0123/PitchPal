@@ -1,9 +1,9 @@
 import librosa
 import numpy as np
-import os
 from core.stt_pronunciation import transcribe_audio, export_differences_to_html
 from utils.text_utils import evaluate_pronunciation
-from visualization.speech_analysis_visualization import plot_mfcc_features, plot_pitch_summary, plot_summary_metrics
+#from visualization.speech_analysis_visualization import plot_mfcc_features, plot_pitch_summary, plot_summary_metrics
+from filler_words import detect_filler_words
 
 # 음성 불러오기
 def load_audio(audio_path):
@@ -25,12 +25,6 @@ def extract_pitch(audio, sr):
     pitch_mean = np.mean(pitch_values)
     pitch_std = np.std(pitch_values)
     return pitch_mean, pitch_std
-
-# 추임새 단어 감지
-def detect_filler_words(transcript, fillers=["음", "어", "그", "저기", "이런"]):
-    words = transcript.split()
-    filler_count = sum(words.count(f) for f in fillers)
-    return filler_count
 
 # 침묵 제거 후 실제 발화 시간 기반 WPM 계산
 def estimate_wpm_precise(audio, sr, text):
@@ -56,7 +50,7 @@ def analyze_speech(audio_path, reference_text_path, target_wpm=140):
     mfcc_mean, mfcc_std = extract_mfcc(audio, sr)
     pitch_mean, pitch_std = extract_pitch(audio, sr)
     precise_wpm = estimate_wpm_precise(audio, sr, stt_text)
-    filler_count = detect_filler_words(stt_text)
+    filler_count, filler_occurrences = detect_filler_words(audio_path)
 
     # STT와 대본을 비교하여 발음 정확도 계산
     pronunciation_accuracy = evaluate_pronunciation(reference_text, stt_text)
@@ -70,15 +64,17 @@ def analyze_speech(audio_path, reference_text_path, target_wpm=140):
     print(f"Pitch Features (STD): {pitch_std:.2f} Hz")
     print(f"Words Per Minute (정밀): {precise_wpm:.2f}")
     print(f"추임새 사용 횟수: {filler_count}회")
+    if filler_count > 0:
+        print(f"사용한 추임새: {filler_occurrences}")
 
     # stt 변환 및 발음 분석 결과를 해당 html 파일 경로에 저장
     output_html_path = "model/speech/results/stt_results.html" 
     export_differences_to_html(reference_text, stt_text, output_html_path)
 
     # 음성 분석 후 결과 시각화
-    plot_mfcc_features(mfcc_mean, mfcc_std)
-    plot_pitch_summary(pitch_mean, pitch_std)
-    plot_summary_metrics(precise_wpm, pronunciation_accuracy, filler_count)
+    #plot_mfcc_features(mfcc_mean, mfcc_std)
+    #plot_pitch_summary(pitch_mean, pitch_std)
+    #plot_summary_metrics(precise_wpm, pronunciation_accuracy, filler_count)
 
     # 평가 출력
     print("\n[발표 평가]")
