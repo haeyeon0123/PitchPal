@@ -22,13 +22,13 @@ def plot_mfcc_features(mfcc_mean, mfcc_std):
     plt.show()
 
 # 2. Pitch Visualization
-def plot_pitch_summary(pitch_mean, pitch_std):
+def plot_pitch_summary(mean, std):
     plt.figure(figsize=(6, 4))
-    y_min = pitch_mean - pitch_std
-    y_max = pitch_mean + pitch_std
+    y_min = mean - std
+    y_max = mean + std
 
     # 평균값 선 (파란색 실선)
-    plt.axhline(y=pitch_mean, color='blue', linestyle='-', linewidth=2, label="Pitch Mean")
+    plt.axhline(y=mean, color='blue', linestyle='-', linewidth=2, label="Pitch Mean")
 
     # 표준편차 영역 (회색 음영)
     plt.fill_between([0, 1], y_min, y_max, color='lightgray', alpha=0.5, label="±1 Std Dev")
@@ -45,7 +45,6 @@ def plot_pitch_summary(pitch_mean, pitch_std):
 def plot_summary_metrics(wpm, pronunciation_accuracy, filler_count):
     labels = ["Speech Rate (WPM)", "Pronunciation Accuracy (%)", "Filler Words"]
     values = [wpm, pronunciation_accuracy * 100, filler_count]
-
     colors = ["#8BC34A", "#03A9F4", "#FF5722"]
 
     plt.figure(figsize=(8, 4))

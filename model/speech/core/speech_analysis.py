@@ -1,12 +1,13 @@
 import librosa
 import numpy as np
-from model.speech.stt_pronunciation import transcribe_audio, evaluate_pronunciation, export_differences_to_html
-from speech_analysis_visualization import plot_mfcc_features, plot_pitch_summary,plot_summary_metrics
+import os
+from core.stt_pronunciation import transcribe_audio, export_differences_to_html
+from utils.text_utils import evaluate_pronunciation
+from visualization.speech_analysis_visualization import plot_mfcc_features, plot_pitch_summary, plot_summary_metrics
 
 # 음성 불러오기
 def load_audio(audio_path):
-    audio, sr = librosa.load(audio_path, sr=16000)
-    return audio, sr
+    return librosa.load(audio_path, sr=16000)
 
 # mfcc 추출
 def extract_mfcc(audio, sr):
@@ -32,12 +33,12 @@ def detect_filler_words(transcript, fillers=["음", "어", "그", "저기", "이
     return filler_count
 
 # 침묵 제거 후 실제 발화 시간 기반 WPM 계산
-def estimate_wpm_precise(audio, sr, transcript):
+def estimate_wpm_precise(audio, sr, text):
     non_silent_intervals = librosa.effects.split(audio, top_db=30)
     active_speech_duration_sec = sum((end - start) for start, end in non_silent_intervals) / sr
     if active_speech_duration_sec == 0:
         return 0.0
-    word_count = len(transcript.split())
+    word_count = len(text.split())
     wpm = (word_count / active_speech_duration_sec) * 60
     return wpm
 
@@ -49,7 +50,6 @@ def analyze_speech(audio_path, reference_text_path, target_wpm=140):
 
     # STT 수행
     stt_text = transcribe_audio(audio_path)
-    #print(f"\n[STT 변환 결과]\n{stt_text}\n")
 
     # 음성 분석 수행
     audio, sr = load_audio(audio_path)
@@ -57,6 +57,10 @@ def analyze_speech(audio_path, reference_text_path, target_wpm=140):
     pitch_mean, pitch_std = extract_pitch(audio, sr)
     precise_wpm = estimate_wpm_precise(audio, sr, stt_text)
     filler_count = detect_filler_words(stt_text)
+
+    # STT와 대본을 비교하여 발음 정확도 계산
+    pronunciation_accuracy = evaluate_pronunciation(reference_text, stt_text)
+    print(f"\n✅ 발음 유사도 점수 (공백 및 문장 부호 무시): {pronunciation_accuracy * 100:.2f}%")
 
     # 분석 결과 출력
     print(f"[음성 분석 결과]")
@@ -67,18 +71,14 @@ def analyze_speech(audio_path, reference_text_path, target_wpm=140):
     print(f"Words Per Minute (정밀): {precise_wpm:.2f}")
     print(f"추임새 사용 횟수: {filler_count}회")
 
-    # STT와 대본을 비교하여 발음 정확도 계산
-    pronunciation_accuracy = evaluate_pronunciation(reference_text, stt_text)
-    print(f"\n✅ 발음 유사도 점수 (공백 및 문장 부호 무시): {pronunciation_accuracy * 100:.2f}%")
-
-    output_html_path = "data/stt_results.html" # 결과를 해당 csv 파일 경로에 저장
+    # stt 변환 및 발음 분석 결과를 해당 html 파일 경로에 저장
+    output_html_path = "model/speech/results/stt_results.html" 
     export_differences_to_html(reference_text, stt_text, output_html_path)
 
-    # 분석 후 결과 시각화
+    # 음성 분석 후 결과 시각화
     plot_mfcc_features(mfcc_mean, mfcc_std)
     plot_pitch_summary(pitch_mean, pitch_std)
     plot_summary_metrics(precise_wpm, pronunciation_accuracy, filler_count)
-
 
     # 평가 출력
     print("\n[발표 평가]")

@@ -27,7 +27,7 @@ for i in range(1, 11):
     results.append({"filename": f"pitch{i}.m4a", "pause_ratio": pause_ratio})
 
 # CSV 파일로 저장
-csv_file = "data/pause_ratios.csv"
+csv_file = "model/speech/results/pause_ratios.csv"
 with open(csv_file, mode="w", newline="", encoding="utf-8") as f:
     writer = csv.DictWriter(f, fieldnames=["filename", "pause_ratio"])
     writer.writeheader()
