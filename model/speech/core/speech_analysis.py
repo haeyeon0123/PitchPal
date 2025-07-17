@@ -4,6 +4,7 @@ from core.stt_pronunciation import transcribe_audio, export_differences_to_html
 from utils.text_utils import evaluate_pronunciation
 #from visualization.speech_analysis_visualization import plot_mfcc_features, plot_pitch_summary, plot_summary_metrics
 from filler_words import detect_filler_words
+from pause_ratio_calculator import calculate_pause_ratio
 
 # 음성 불러오기
 def load_audio(audio_path):
@@ -51,6 +52,7 @@ def analyze_speech(audio_path, reference_text_path, target_wpm=140):
     pitch_mean, pitch_std = extract_pitch(audio, sr)
     precise_wpm = estimate_wpm_precise(audio, sr, stt_text)
     filler_count, filler_occurrences = detect_filler_words(audio_path)
+    pause_ratio = calculate_pause_ratio(audio_path)
 
     # STT와 대본을 비교하여 발음 정확도 계산
     pronunciation_accuracy = evaluate_pronunciation(reference_text, stt_text)
@@ -64,6 +66,7 @@ def analyze_speech(audio_path, reference_text_path, target_wpm=140):
     print(f"Pitch Features (STD): {pitch_std:.2f} Hz")
     print(f"Words Per Minute (정밀): {precise_wpm:.2f}")
     print(f"추임새 사용 횟수: {filler_count}회")
+    print(f"무음 구간 비율: {pause_ratio:.2f}")
     if filler_count > 0:
         print(f"사용한 추임새: {filler_occurrences}")
 
