@@ -70,21 +70,3 @@ def highlight_differences(ref_text, stt_text):
 def transcribe_audio(audio_path):
     segments, _ = model.transcribe(audio_path)
     return " ".join([seg.text.strip() for seg in segments])
-
-# 경로 설정
-audio_path = "data/pitch_sample.m4a"
-script_path = "data/pitch_sample_script.txt"
-
-# 대본 로드
-with open(script_path, 'r', encoding='utf-8') as f:
-    reference_text = f.read()
-
-# STT 수행
-transcribed_text = transcribe_audio(audio_path)
-
-# 유사도 점수 출력
-similarity = evaluate_pronunciation(reference_text, transcribed_text)
-print("\n✅ 발음 유사도 점수 (공백 및 문장 부호 무시): {:.2f}%".format(similarity * 100))
-
-# 시각화 출력
-highlight_differences(reference_text, transcribed_text)
