@@ -38,20 +38,20 @@ def estimate_wpm_precise(audio, sr, text):
     return wpm
 
 # 음성 전체 분석 및 STT 변환 실행
-def analyze_speech(audio_path, reference_text_path, target_wpm=140):
+def analyze_speech(audio_path, reference_text_path, model, target_wpm=140):
 
     with open(reference_text_path, 'r', encoding='utf-8') as f:
         reference_text = f.read()
 
     # STT 수행
-    stt_text = transcribe_audio(audio_path)
+    stt_text, segments = transcribe_audio(audio_path, model)
 
     # 음성 분석 수행
     audio, sr = load_audio(audio_path)
     mfcc_mean, mfcc_std = extract_mfcc(audio, sr)
     pitch_mean, pitch_std = extract_pitch(audio, sr)
     precise_wpm = estimate_wpm_precise(audio, sr, stt_text)
-    filler_count, filler_occurrences = detect_filler_words(audio_path)
+    filler_count, filler_occurrences = detect_filler_words(segments)
     pause_ratio = calculate_pause_ratio(audio_path)
 
     # STT와 대본을 비교하여 발음 정확도 계산
@@ -59,7 +59,7 @@ def analyze_speech(audio_path, reference_text_path, target_wpm=140):
     print(f"\n✅ 발음 유사도 점수 (공백 및 문장 부호 무시): {pronunciation_accuracy * 100:.2f}%")
 
     # 분석 결과 출력
-    print(f"[음성 분석 결과]")
+    print(f"✅ 음성 분석 결과")
     print(f"MFCC Features (Mean): {mfcc_mean}")
     print(f"MFCC Features (STD): {mfcc_std}")
     print(f"Pitch Features (Mean): {pitch_mean:.2f} Hz")
@@ -74,10 +74,10 @@ def analyze_speech(audio_path, reference_text_path, target_wpm=140):
     output_html_path = "model/speech/results/stt_results.html" 
     export_differences_to_html(reference_text, stt_text, output_html_path)
 
-    # 음성 분석 후 결과 시각화
+    """# 음성 분석 후 결과 시각화
     #plot_mfcc_features(mfcc_mean, mfcc_std)
     #plot_pitch_summary(pitch_mean, pitch_std)
-    #plot_summary_metrics(precise_wpm, pronunciation_accuracy, filler_count)
+    #plot_summary_metrics(precise_wpm, pronunciation_accuracy, filler_count)"""
 
     # 평가 출력
     print("\n[발표 평가]")

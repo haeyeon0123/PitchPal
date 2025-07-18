@@ -1,7 +1,6 @@
 # 실행
 import time
 from core.speech_analysis import analyze_speech
-#from core.filler_words import detect_filler_words
 from core.stt_pronunciation import load_whisper_model
 #from pause_ratio_calculator import calculate_pause_ratio
 
@@ -13,12 +12,7 @@ if __name__ == "__main__":
 
     model = load_whisper_model("small") 
 
-    #filler_count, filler_list = detect_filler_words(audio_path, model)
-
-    #print(f"[간투사 개수] {filler_count}")
-    #print(f"[간투사 목록] {filler_list}")
-    analyze_speech(audio_path, script_path)
-    #calculate_pause_ratio(audio_path)
+    analyze_speech(audio_path, script_path, model)
 
     total_end = time.time()  # ⏱ 전체 종료 시간 기록
     print(f"\n⏱ 총 실행 시간        : {total_end - total_start:.2f}초")
