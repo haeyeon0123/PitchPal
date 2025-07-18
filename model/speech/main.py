@@ -1,5 +1,5 @@
 # 실행
-from core.speech_analysis import analyze_speech, detect_filler_words
+from core.speech_analysis import analyze_speech
 #from pause_ratio_calculator import calculate_pause_ratio
 
 if __name__ == "__main__":

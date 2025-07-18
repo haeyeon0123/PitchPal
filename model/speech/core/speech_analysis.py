@@ -3,8 +3,8 @@ import numpy as np
 from core.stt_pronunciation import transcribe_audio, export_differences_to_html
 from utils.text_utils import evaluate_pronunciation
 #from visualization.speech_analysis_visualization import plot_mfcc_features, plot_pitch_summary, plot_summary_metrics
-from filler_words import detect_filler_words
-from pause_ratio_calculator import calculate_pause_ratio
+from core.filler_words import detect_filler_words
+from core.pause_ratio_calculator import calculate_pause_ratio
 
 # 음성 불러오기
 def load_audio(audio_path):
