@@ -2,7 +2,6 @@
 import time
 from core.speech_analysis import analyze_speech
 from core.stt_pronunciation import load_whisper_model
-#from pause_ratio_calculator import calculate_pause_ratio
 
 if __name__ == "__main__":
     total_start = time.time()  # ⏱ 전체 시작 시간 기록

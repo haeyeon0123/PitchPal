@@ -1,16 +1,14 @@
 from faster_whisper import WhisperModel
 from utils.text_utils import tokenize, get_diff_indices
-from core.filler_words import detect_filler_words
 
 # whisper 모델 로드
 def load_whisper_model(size="medium", device="cpu", compute_type="int8"):
     return WhisperModel(size, device=device, compute_type=compute_type)
 
-# Word-level 정보 출력 함수(확인용)
+"""# Word-level 정보 출력 함수(확인용)
 def print_word_level_output(audio_path, model):
     # STT 수행 (word timestamps 활성화)
     segments, info = model.transcribe(audio_path, word_timestamps=True)
-
     print(f"Transcription Info: duration={info.duration:.2f}s\n")
 
     for i, segment in enumerate(segments):
@@ -19,12 +17,17 @@ def print_word_level_output(audio_path, model):
         print("Words:")
         for word_info in segment.words:
             print(f"  - {word_info.word.strip()} ({word_info.start:.2f}s ~ {word_info.end:.2f}s)")
-        print()
+        print()"""
 
 # STT 변환 수행 후 간투사 감지 함수 호출
 def transcribe_audio(audio_path, model):
-    segments, _ = model.transcribe(audio_path)
-    return " ".join([seg.text.strip() for seg in segments]), segments
+    try:
+        segments, _ = model.transcribe(audio_path, word_timestamps=True)
+        stt_text = " ".join([seg.text.strip() for seg in segments])
+        return stt_text, segments
+    except Exception as e:
+        print(f"❌ STT 변환 실패: {e}")
+        return "", []
 
 # HTML로 차이 강조 결과 저장
 def export_differences_to_html(reference_text, stt_text, output_path):
