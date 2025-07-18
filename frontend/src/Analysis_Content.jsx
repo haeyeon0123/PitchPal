@@ -1,38 +1,59 @@
 /* 내용 분석 페이지: 기능 및 디자인 */
 
 import React, { useState, useRef } from 'react';
+import axios from 'axios';
 import './Analysis_Content.css';
 import { CloudUpload, FileText, Hash, ListChecks } from 'lucide-react';
 
 export default function AnalysisContent() {
   const [file, setFile] = useState(null);
   const [progress, setProgress] = useState(0);
-  const [stats, setStats] = useState({ wordCount: 0, errorCount: 0, avgErrors: 0 });
+  const [stats, setStats] = useState(null);
   const [errors, setErrors] = useState([]);
   const [originalText, setOriginalText] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+
   const fileInputRef = useRef(null);
 
-  const handleFileSelect = e => {
+  const fetchContentAnalysis = async (file) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    const response = await axios.post('http://localhost:8000/analyze-content', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+    return response.data;
+  };
+
+  const handleFileSelect = async (e) => {
     const selectedFile = e.target.files[0];
     if (!selectedFile) return;
+
     setFile(selectedFile);
     setProgress(0);
-    // TODO: 실제 검사 로직 연동
+    setStats(null);
+    setErrors([]);
+    setOriginalText('');
+    setError(null);
+    setLoading(true);
+
+    let current = 0;
     const interval = setInterval(() => {
-      setProgress(prev => {
-        if (prev >= 100) { clearInterval(interval); return 100; }
-        return prev + 10;
-      });
-    }, 200);
-    // 예시 데이터 세팅
-    setStats({ wordCount: 1234, errorCount: 27, avgErrors: 0.8 });
-    setErrors([
-      { original: '틀린', suggestion: '틀린(정정)', type: '맞춤법' },
-      { original: '예시', suggestion: '예시(수정)', type: '띄어쓰기' }
-    ]);
-    setOriginalText(
-      '여기에 원문 텍스트가 표시됩니다. 오류 위치가 밑줄로 강조됩니다.'
-    );
+      current += 10;
+      setProgress(current);
+      if (current >= 100) clearInterval(interval);
+    }, 120);
+
+    try {
+      const result = await fetchContentAnalysis(selectedFile);
+      setStats(result.stats);
+      setErrors(result.errors);
+      setOriginalText(result.originalText);
+    } catch (err) {
+      setError('분석 실패: ' + (err.response?.data?.detail || err.message));
+    } finally {
+      setLoading(false);
+    }
   };
 
   const handleApplyAll = () => {
@@ -40,10 +61,8 @@ export default function AnalysisContent() {
   };
 
   return (
-    // 배경색 제거
     <div>
       <div className="container mx-auto p-8 space-y-12">
-        {/* 1. 파일 업로드 영역 */}
         <div className="max-w-xl mx-auto p-8 border border-gray-200 bg-[#f7f9fc] rounded-lg text-center">
           <CloudUpload className="mx-auto mb-4 w-12 h-12 text-gray-400" />
           <h3 className="text-lg font-medium mb-2">파일 업로드</h3>
@@ -60,49 +79,33 @@ export default function AnalysisContent() {
             className="px-6 py-3 bg-white rounded-full border border-gray-300 hover:bg-gray-100 transition"
           >
             파일 선택
-            </button>
+          </button>
         </div>
 
-        {/* 2. 검사 진행 상태 */}
-        {file && (
+        {file && progress < 100 && (
           <div className="max-w-xl mx-auto">
-           <progress
-             value={progress}
-             max="100"
-            className="custom-progress w-full h-2 mb-2"
-            />
+            <progress value={progress} max="100" className="custom-progress w-full h-2 mb-2" />
             <p className="text-sm text-gray-600">맞춤법 검사 중… {progress}%</p>
           </div>
         )}
 
-        {/* 3. 요약 대시보드 */}
-        {progress === 100 && (
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
-            <div className="p-6 border rounded-lg bg-white text-center">
-              <FileText className="mx-auto mb-2 w-8 h-8 text-[#5686C4]" />
-              <p className="text-2xl font-bold">{stats.wordCount}</p>
-              <p className="text-gray-500">총 단어 수</p>
-            </div>
-            <div className="p-6 border rounded-lg bg-white text-center">
-              <Hash className="mx-auto mb-2 w-8 h-8 text-[#5686C4]" />
-              <p className="text-2xl font-bold">{stats.errorCount}</p>
-              <p className="text-gray-500">오류 건수</p>
-            </div>
-            <div className="p-6 border rounded-lg bg-white text-center">
-              <ListChecks className="mx-auto mb-2 w-8 h-8 text-[#5686C4]" />
-              <p className="text-2xl font-bold">{stats.avgErrors} /문장</p>
-              <p className="text-gray-500">평균 오류</p>
-            </div>
+        {error && (
+          <div className="text-center text-red-500">
+            <p>{error}</p>
           </div>
         )}
 
-        {/* 4. 텍스트 원문 + 하이라이트 */}
+        {progress === 100 && stats && (
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
+            <SummaryCard icon={<FileText />} value={stats.wordCount} label="총 단어 수" />
+            <SummaryCard icon={<Hash />} value={stats.errorCount} label="오류 건수" />
+            <SummaryCard icon={<ListChecks />} value={`${stats.avgErrors} /문장`} label="평균 오류" />
+          </div>
+        )}
+
         {progress === 100 && (
           <div className="flex flex-col lg:flex-row gap-8">
-            <div
-              className="flex-2 p-4 bg-white border border-gray-100 rounded-lg overflow-auto"
-              style={{ maxHeight: '400px' }}
-            >
+            <div className="flex-2 p-4 bg-white border border-gray-100 rounded-lg overflow-auto" style={{ maxHeight: '400px' }}>
               <pre className="whitespace-pre-wrap text-gray-800">
                 {originalText.split(' ').map((word, idx) => {
                   const err = errors.find(e => word.includes(e.original));
@@ -120,10 +123,7 @@ export default function AnalysisContent() {
                 })}
               </pre>
             </div>
-            <div
-              className="flex-1 p-4 bg-white border border-gray-100 rounded-lg overflow-auto"
-              style={{ maxHeight: '400px' }}
-            >
+            <div className="flex-1 p-4 bg-white border border-gray-100 rounded-lg overflow-auto" style={{ maxHeight: '400px' }}>
               <table className="w-full text-left">
                 <thead>
                   <tr>
@@ -146,7 +146,6 @@ export default function AnalysisContent() {
           </div>
         )}
 
-        {/* 5. 수정 적용 & 다시 분석하기 */}
         {progress === 100 && (
           <div className="flex justify-end space-x-4">
             <button
@@ -164,6 +163,16 @@ export default function AnalysisContent() {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+function SummaryCard({ icon, value, label }) {
+  return (
+    <div className="p-6 border rounded-lg bg-white text-center">
+      <div className="mx-auto mb-2 w-8 h-8 text-[#5686C4]">{icon}</div>
+      <p className="text-2xl font-bold">{value}</p>
+      <p className="text-gray-500">{label}</p>
     </div>
   );
 }
