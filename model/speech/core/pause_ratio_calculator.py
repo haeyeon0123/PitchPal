@@ -1,4 +1,3 @@
-import csv
 from pydub import AudioSegment, silence
 
 def calculate_pause_ratio(audio_path, silence_thresh=-40, min_silence_len=300):
