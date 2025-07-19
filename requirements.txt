@@ -17,3 +17,5 @@ imutils==0.5.3
 scikit_learn==0.22.1
 openai
 dotenv
+faster_whisper
+pydub
