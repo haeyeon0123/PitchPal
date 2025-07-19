@@ -6,8 +6,8 @@ from core.stt_pronunciation import load_whisper_model
 if __name__ == "__main__":
     total_start = time.time()  # ⏱ 전체 시작 시간 기록
 
-    audio_path = "data/pitch_sample.m4a"
-    script_path = "data/pitch_sample_script.txt"
+    audio_path = "data/test1.m4a"
+    script_path = "data/test1.txt"
 
     model = load_whisper_model("small") 
 
