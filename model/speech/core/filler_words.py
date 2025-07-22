@@ -1,4 +1,4 @@
-from utils.text_utils import preprocess_word_for_comparison
+from model.speech.utils.text_utils import preprocess_word_for_comparison
 
 # 추임새(간투사) 단어 감지
 def detect_filler_words(segments, min_duration=0.4):

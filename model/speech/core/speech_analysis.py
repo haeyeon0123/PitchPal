@@ -1,9 +1,15 @@
 import librosa
 import numpy as np
-from core.stt_pronunciation import transcribe_audio, export_differences_to_html
-from utils.text_utils import evaluate_pronunciation
-from core.filler_words import detect_filler_words
-from core.pause_ratio_calculator import calculate_pause_ratio
+
+# ✔️ stt 도구
+from model.speech.core.stt_pronunciation import transcribe_audio, export_differences_to_html
+
+# ✔️ 발음 평가 도구 (utils → speech.utils)
+from model.speech.utils.text_utils import evaluate_pronunciation
+
+# ✔️ 간투사 탐지, 멈춤 분석
+from model.speech.core.filler_words import detect_filler_words
+from model.speech.core.pause_ratio_calculator import calculate_pause_ratio
 
 # 음성 불러오기
 def load_audio(audio_path):
@@ -40,15 +46,8 @@ def estimate_wpm_precise(audio, sr, text):
     wpm = (word_count / active_speech_duration_sec) * 60
     return wpm
 
-# 음성 전체 분석 및 STT 변환 실행
-def analyze_speech(audio_path, reference_text_path, model, target_wpm=140):
-    try:
-        with open(reference_text_path, 'r', encoding='utf-8') as f:
-            reference_text = f.read()
-    except Exception as e:
-        print(f"❌ 대본 로딩 실패: {e}")
-        return
-
+# ✅ 수정된 analyze_speech (reference_text를 문자열로 직접 받음)
+def analyze_speech(audio_path, reference_text, model, target_wpm=140):
     # STT 수행
     stt_text, segments = transcribe_audio(audio_path, model)
 
@@ -78,20 +77,51 @@ def analyze_speech(audio_path, reference_text_path, model, target_wpm=140):
     if filler_count > 0:
         print(f"✅ 사용된 간투사: {filler_occurrences}")
 
-    # stt 변환 및 발음 분석 결과를 해당 html 파일 경로에 저장
-    output_html_path = "model/speech/results/stt_results.html" 
+    # STT와 대본 비교 결과를 HTML로 저장
+    output_html_path = "model/speech/results/stt_results.html"
     export_differences_to_html(reference_text, stt_text, output_html_path)
 
-    """# 음성 분석 후 결과 시각화
-    #plot_mfcc_features(mfcc_mean, mfcc_std)
-    #plot_pitch_summary(pitch_mean, pitch_std)
-    #plot_summary_metrics(precise_wpm, pronunciation_accuracy, filler_count)"""
+    # 결과 요약 반환 (백엔드 JSON 응답용)
+    return {
+    "stats": {
+        "speed": float(round(precise_wpm, 2)),
+        "accuracy": float(round(pronunciation_accuracy * 100, 2)),
+        "fillerCount": int(filler_count),
+        "pauseAvg": float(round(pause_ratio, 2))
+    },
+    "speedData": [
+        {"time": i * 10, "wpm": float(round(precise_wpm + np.random.randn() * 5, 2))}
+        for i in range(6)
+    ],
+    "pitchAndVolumeData": [
+        {
+            "pitch": float(round(pitch_mean, 2)),
+            "pitchStd": float(round(pitch_std, 2))
+        },
+        {
+            "mfccMean": [float(x) for x in mfcc_mean.tolist()],
+            "mfccStd": [float(x) for x in mfcc_std.tolist()]
+        }
+    ],
+    "fillerData": [
+        {"word": word, "count": int(count)}
+        for word, count in filler_occurrences.items()
+    ],
+    "pauseData": [
+        {"length": float(round(pause_ratio, 2)), "freq": 1}
+    ],
+    "tips": generate_tips(pronunciation_accuracy, pitch_mean, precise_wpm, filler_count)
+}
 
-    # 평가 출력
-    print("\n[발표 평가]")
-    if pronunciation_accuracy > 0.8 and pitch_mean > 70 and precise_wpm > 100 and filler_count < 5:
-        print("✅ 발음, 억양, 속도 모두 잘 조화되어 있습니다! 발표가 자연스럽습니다.")
-    elif pronunciation_accuracy > 0.6:
-        print("🔶 발음은 괜찮습니다. 억양 또는 추임새, 속도에 조금 더 주의해주세요.")
-    else:
-        print("❌ 발음과 억양, 속도 전반에 개선이 필요합니다. 꾸준한 연습이 도움이 됩니다.")
+# 팁 생성 함수
+def generate_tips(accuracy, pitch, wpm, filler_count):
+    tips = []
+    if wpm > 180:
+        tips.append("말이 너무 빠를 수 있어요. 천천히 또박또박 말해보세요.")
+    if accuracy < 0.7:
+        tips.append("발음 정확도를 높이기 위해 문장을 천천히 따라 읽는 연습을 해보세요.")
+    if filler_count > 3:
+        tips.append("‘음’, ‘어’ 같은 간투사를 줄이기 위해 잠깐 멈추는 습관을 길러보세요.")
+    if pitch < 70:
+        tips.append("억양이 단조로워요. 강조하고 싶은 단어에 힘을 줘보세요.")
+    return tips

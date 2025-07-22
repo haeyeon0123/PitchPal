@@ -1,7 +1,7 @@
 import librosa
 import numpy as np
 from faster_whisper import WhisperModel
-from utils.text_utils import evaluate_pronunciation, normalize_word
+from model.speech.utils.text_utils import evaluate_pronunciation, normalize_word
 
 class SpeechAnalyzer:
     def __init__(self, audio_path, reference_text_path, model_size="small"):

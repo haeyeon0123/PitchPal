@@ -1,7 +1,5 @@
-/* 음성 분석 페이지: 기능 및 디자인 */
-
 import React, { useState, useRef } from 'react';
-import axios from 'axios';  // ✅ axios 추가
+import axios from 'axios';
 import './Analysis_Voice.css';
 import {
   Mic2, Clock, CheckCircle, Slash, PauseCircle, Activity, Volume2
@@ -12,7 +10,8 @@ import {
 } from 'recharts';
 
 export default function AnalysisVoice() {
-  const [file, setFile] = useState(null);
+  const [audioFile, setAudioFile] = useState(null);
+  const [scriptFile, setScriptFile] = useState(null);
   const [audioUrl, setAudioUrl] = useState(null);
   const [progress, setProgress] = useState(0);
   const [loading, setLoading] = useState(false);
@@ -26,29 +25,52 @@ export default function AnalysisVoice() {
   const [tips, setTips] = useState([]);
 
   const audioRef = useRef(null);
-  const fileInputRef = useRef(null);
+  const fileAudioRef = useRef(null);
+  const fileScriptRef = useRef(null);
   const playerRef = useRef(null);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
 
-  // ✅ 실제 API 연동
-  const fetchAnalysisResult = async (file) => {
-    const formData = new FormData();
-    formData.append('file', file);
+  const handleAudioSelect = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    setAudioFile(file);
+    setAudioUrl(URL.createObjectURL(file));
+  };
 
-    const response = await axios.post('http://localhost:8000/analyze-audio', formData, {
-      headers: { 'Content-Type': 'multipart/form-data' }
+  const handleScriptSelect = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    setScriptFile(file);
+  };
+
+  const fetchAnalysisResult = async () => {
+    const formData = new FormData();
+    formData.append("audio_file", audioFile);
+    formData.append("script_file", scriptFile);
+
+    const response = await axios.post("http://localhost:8000/analyze-speech", formData, {
+      headers: { "Content-Type": "multipart/form-data" }
     });
 
     return response.data;
   };
 
-  const handleFileSelect = async (e) => {
-    const selected = e.target.files[0];
-    if (!selected) return;
+  const handleAnalyze = async () => {
 
-    setFile(selected);
-    setAudioUrl(URL.createObjectURL(selected));
+    console.log("🟡 handleAnalyze 실행됨");
+    
+    if (!audioFile || !scriptFile) {
+      setError("🎤 음성 파일과 📝 대본 파일을 모두 업로드해주세요.");
+
+      console.log("⛔ 파일 안 업로드됨");
+
+      return;
+    }
+
+    console.log("🟢 분석 시작됨 - axios 요청 보내는 중");
+
+
     setProgress(0);
     setStats(null);
     setError(null);
@@ -62,16 +84,27 @@ export default function AnalysisVoice() {
     }, 120);
 
     try {
-      const result = await fetchAnalysisResult(selected);
+      const result = await fetchAnalysisResult();
 
-      setStats(result.stats);
-      setSpeedData(result.speedData);
-      setPitchAndVolumeData(result.pitchAndVolumeData);
-      setFillerData(result.fillerData);
-      setPauseData(result.pauseData);
-      setTips(result.tips);
+setStats(result.stats);
+setSpeedData(result.speedData);
+setPitchAndVolumeData(result.pitchAndVolumeData?.map((d, i) =>
+  i === 0 ? {
+    x: 0,
+    pitch: d.pitch || 0,
+    volume: d.pitchStd || 0
+  } : {
+    x: 1,
+    pitch: d.mfccMean ? d.mfccMean[0] || 0 : 0,
+    volume: d.mfccStd ? d.mfccStd[0] || 0 : 0
+  }
+) || []);
+setFillerData(result.fillerData);
+setPauseData(result.pauseData);
+setTips(result.tips);
+
     } catch (err) {
-      setError('분석 실패: ' + (err.response?.data?.detail || err.message));
+      setError("분석 실패: " + (err.response?.data?.detail || err.message));
     } finally {
       setLoading(false);
     }
@@ -87,30 +120,53 @@ export default function AnalysisVoice() {
   return (
     <div className="container mx-auto p-8 space-y-12">
       {/* 파일 업로드 */}
-      <div className="max-w-xl mx-auto p-8 border border-gray-200 bg-[#f7f9fc] rounded-lg text-center">
-        <Mic2 className="mx-auto mb-4 w-12 h-12 text-gray-400" />
-        <h3 className="text-lg font-medium mb-2">음성 파일 업로드</h3>
-        <p className="text-sm text-gray-500 mb-4">.mp3, .wav, .ogg 지원</p>
-        <input
-          type="file"
-          ref={fileInputRef}
-          accept=".mp3,.wav,.ogg"
-          className="hidden"
-          onChange={handleFileSelect}
-        />
+      <div className="max-w-xl mx-auto p-8 border border-gray-200 bg-[#f7f9fc] rounded-lg text-center space-y-4">
+        <Mic2 className="mx-auto w-12 h-12 text-gray-400" />
+        <h3 className="text-lg font-medium">분석할 파일 업로드</h3>
+
+        <div className="space-y-2">
+          <input
+            type="file"
+            accept=".mp3,.wav,.ogg"
+            ref={fileAudioRef}
+            onChange={handleAudioSelect}
+            className="hidden"
+          />
+          <button
+            onClick={() => fileAudioRef.current?.click()}
+            className="px-6 py-2 border rounded-full bg-white hover:bg-gray-100"
+          >
+            음성 파일 선택
+          </button>
+
+          <input
+            type="file"
+            accept=".txt"
+            ref={fileScriptRef}
+            onChange={handleScriptSelect}
+            className="hidden"
+          />
+          <button
+            onClick={() => fileScriptRef.current?.click()}
+            className="px-6 py-2 border rounded-full bg-white hover:bg-gray-100"
+          >
+            대본 파일 선택
+          </button>
+        </div>
+
         <button
-          onClick={() => fileInputRef.current?.click()}
-          className="px-6 py-3 bg-white rounded-full border border-gray-300 hover:bg-gray-100 transition"
+          onClick={handleAnalyze}
+          className="mt-4 px-8 py-3 bg-[#3EB489] text-white font-semibold rounded-full hover:bg-[#36A778] transition"
         >
-          파일 선택
+          분석 시작
         </button>
       </div>
 
-      {/* 분석 상태 */}
-      {file && progress < 100 && (
+      {/* 진행률 표시 */}
+      {loading && progress < 100 && (
         <div className="max-w-xl mx-auto">
           <progress value={progress} max="100" className="custom-progress w-full h-2 mb-2" />
-          <p className="text-sm text-gray-600">음성 분석 중… {progress}%</p>
+          <p className="text-sm text-gray-600">분석 중… {progress}%</p>
         </div>
       )}
 
@@ -172,11 +228,17 @@ export default function AnalysisVoice() {
         </div>
       )}
 
-      {/* 차트들 */}
+      {/* 분석 차트 */}
       {progress === 100 && (
         <section className="mt-12 grid grid-cols-1 sm:grid-cols-2 gap-6 justify-items-center">
           <ChartCard title="속도 변화" chart={
-            <LineChart data={speedData}><CartesianGrid strokeDasharray="3 3" /><XAxis dataKey="time" /><YAxis /><RechartsTooltip /><Line type="monotone" dataKey="speed" stroke="#5686C4" strokeWidth={2} /></LineChart>
+            <LineChart data={speedData}>
+              <CartesianGrid strokeDasharray="3 3" />
+              <XAxis dataKey="time" />
+              <YAxis />
+              <RechartsTooltip />
+              <Line type="monotone" dataKey="wpm" stroke="#5686C4" strokeWidth={2} />
+            </LineChart>
           } />
           <ChartCard title="억양·음량" chart={
             <LineChart data={pitchAndVolumeData}>
@@ -190,15 +252,27 @@ export default function AnalysisVoice() {
             </LineChart>
           } />
           <ChartCard title="불필요 단어" chart={
-            <BarChart data={fillerData}><CartesianGrid strokeDasharray="3 3" /><XAxis dataKey="word" /><YAxis /><RechartsTooltip /><Bar dataKey="count" fill="#5686C4" barSize={20} /></BarChart>
+            <BarChart data={fillerData}>
+              <CartesianGrid strokeDasharray="3 3" />
+              <XAxis dataKey="word" />
+              <YAxis />
+              <RechartsTooltip />
+              <Bar dataKey="count" fill="#5686C4" barSize={20} />
+            </BarChart>
           } />
           <ChartCard title="어간 공백 길이" chart={
-            <BarChart data={pauseData}><CartesianGrid strokeDasharray="3 3" /><XAxis dataKey="length" /><YAxis /><RechartsTooltip /><Bar dataKey="freq" fill="#5686C4" barSize={20} /></BarChart>
+            <BarChart data={pauseData}>
+              <CartesianGrid strokeDasharray="3 3" />
+              <XAxis dataKey="length" />
+              <YAxis />
+              <RechartsTooltip />
+              <Bar dataKey="freq" fill="#5686C4" barSize={20} />
+            </BarChart>
           } />
         </section>
       )}
 
-      {/* 팁 */}
+      {/* 개선 팁 */}
       {progress === 100 && tips.length > 0 && (
         <section className="mt-12 bg-white p-8 border border-gray-100 rounded-lg">
           <h3 className="text-xl font-bold text-[#826BC4] mb-4">개선 제안</h3>
@@ -208,7 +282,7 @@ export default function AnalysisVoice() {
         </section>
       )}
 
-      {/* 버튼 */}
+      {/* 다시 재생 / 분석 */}
       {progress === 100 && (
         <div className="flex justify-end space-x-4 mt-8">
           <button onClick={handleReplay} className="px-6 py-3 bg-[#3EB489] text-white font-semibold rounded-lg hover:bg-[#36A778] transition">

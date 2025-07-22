@@ -1,5 +1,12 @@
+import sys
+import os
+
+# PitchPal 루트 경로를 sys.path에 추가
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..')))
+
 from faster_whisper import WhisperModel
-from utils.text_utils import tokenize, get_diff_indices
+from model.speech.utils.text_utils import tokenize, get_diff_indices
+
 
 # whisper 모델 로드
 def load_whisper_model(size="medium", device="cpu", compute_type="int8"):
