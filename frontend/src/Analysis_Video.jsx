@@ -1,7 +1,7 @@
 import React, { useState, useRef } from 'react';
+import { Video } from 'lucide-react';
 import axios from 'axios';
 import './Analysis_Video.css';
-import { Video, Camera, Eye, Smile, Target } from 'lucide-react';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip,
   BarChart, Bar, PieChart, Pie, Cell, ResponsiveContainer
@@ -10,10 +10,7 @@ import {
 export default function AnalysisVideo() {
   const [fileUrl, setFileUrl] = useState(null);
   const [progress, setProgress] = useState(0);
-  const [angleData, setAngleData] = useState([]);
-  const [blinkData, setBlinkData] = useState([]);
-  const [expressionData, setExpressionData] = useState([]);
-  const [tips, setTips] = useState([]);
+  const [analysis, setAnalysis] = useState(null);
   const [error, setError] = useState(null);
 
   const fileInputRef = useRef(null);
@@ -33,17 +30,15 @@ export default function AnalysisVideo() {
   const handleFileSelect = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
+
     setFileUrl(URL.createObjectURL(file));
     setError(null);
-    setAngleData([]);
-    setBlinkData([]);
-    setExpressionData([]);
-    setTips([]);
     setProgress(0);
+    setAnalysis(null);
 
     const interval = setInterval(() => {
-      setProgress((p) => {
-        const next = p + 10;
+      setProgress((prev) => {
+        const next = prev + 10;
         if (next >= 100) {
           clearInterval(interval);
           return 100;
@@ -54,10 +49,7 @@ export default function AnalysisVideo() {
 
     try {
       const result = await fetchVideoAnalysis(file);
-      setAngleData(result.angleData || []);
-      setBlinkData(result.blinkData || []);
-      setExpressionData(result.expressionData || []);
-      setTips(result.tips || []);
+      setAnalysis(result);
     } catch (err) {
       setError('분석 실패: ' + (err.response?.data?.detail || err.message));
     }
@@ -72,26 +64,20 @@ export default function AnalysisVideo() {
 
   const handleReload = () => window.location.reload();
 
+  const blinkSummary = analysis?.blink_summary;
+  const tips = analysis?.tips || [];
+
   return (
     <div className="container mx-auto p-8 space-y-12">
-      <div className="max-w-xl mx-auto p-8 border border-gray-200 bg-[#f7f9fc] rounded-lg text-center">
-        <Video className="mx-auto mb-4 w-12 h-12 text-gray-400" />
-        <h3 className="text-lg font-medium mb-2">영상 파일 업로드</h3>
-        <p className="text-sm text-gray-500 mb-4">.mp4, .mov, .avi 지원</p>
-        <input
-          type="file"
-          ref={fileInputRef}
-          accept=".mp4,.mov,.avi"
-          className="hidden"
-          onChange={handleFileSelect}
-        />
-        <button
-          onClick={() => fileInputRef.current?.click()}
-          className="px-6 py-3 bg-white rounded-full border border-gray-300 hover:bg-gray-100 transition"
-        >
-          파일 선택
-        </button>
-      </div>
+      {!analysis && (
+        <div className="max-w-xl mx-auto p-8 border border-gray-200 bg-[#f7f9fc] rounded-lg text-center">
+          <Video className="mx-auto mb-4 w-12 h-12 text-gray-400" />
+          <h3 className="text-lg font-medium mb-2">영상 파일 업로드</h3>
+          <p className="text-sm text-gray-500 mb-4">.mp4, .mov, .avi 지원</p>
+          <input type="file" ref={fileInputRef} accept=".mp4,.mov,.avi" className="hidden" onChange={handleFileSelect} />
+          <button onClick={() => fileInputRef.current?.click()} className="px-6 py-3 bg-white rounded-full border border-gray-300 hover:bg-gray-100 transition">파일 선택</button>
+        </div>
+      )}
 
       {fileUrl && progress < 100 && (
         <div className="max-w-xl mx-auto">
@@ -100,67 +86,97 @@ export default function AnalysisVideo() {
         </div>
       )}
 
-      {error && (
-        <div className="text-center text-red-500">{error}</div>
-      )}
+      {error && <div className="text-center text-red-500">{error}</div>}
 
-      {progress === 100 && (
+      {analysis && (
         <>
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-6">
-            <SummaryCard icon={<Camera />} label="각도 편차" value="-" />
-            <SummaryCard icon={<Eye />} label="눈 깜빡임 빈도" value="-" />
-            <SummaryCard icon={<Smile />} label="표정 변화" value="-" />
-            <SummaryCard icon={<Target />} label="시선 집중도" value="-" />
-          </div>
-
-          <div className="flex flex-col lg:flex-row gap-8">
-            <video ref={videoRef} controls className="w-full lg:w-1/2 rounded-lg shadow" src={fileUrl} />
-            <div className="w-full lg:w-1/2 bg-white border rounded-lg p-4">
-              <h4 className="text-lg font-semibold text-[#5686C4] mb-2">시선 히트맵</h4>
-              <div className="w-full h-64 bg-gray-100 flex items-center justify-center">Heatmap Placeholder</div>
+          {/* 영상 + 다시 업로드 */}
+          <div className="flex flex-col lg:flex-row gap-8 items-start">
+            <div className="max-w-xl w-full p-8 border border-gray-200 bg-[#f7f9fc] rounded-lg text-center">
+              <Video className="mx-auto mb-4 w-12 h-12 text-gray-400" />
+              <h3 className="text-lg font-medium mb-2">다른 영상 업로드</h3>
+              <p className="text-sm text-gray-500 mb-4">.mp4, .mov, .avi 지원</p>
+              <input type="file" ref={fileInputRef} accept=".mp4,.mov,.avi" className="hidden" onChange={handleFileSelect} />
+              <button onClick={() => fileInputRef.current?.click()} className="px-6 py-3 bg-white rounded-full border border-gray-300 hover:bg-gray-100 transition">파일 선택</button>
+            </div>
+            <div className="w-full lg:flex-1">
+              <div className="rounded-lg overflow-hidden shadow max-w-2xl mx-auto">
+                <video ref={videoRef} controls className="w-full h-auto object-contain" src={fileUrl} />
+              </div>
             </div>
           </div>
 
-          <section className="mt-12 grid grid-cols-1 sm:grid-cols-3 gap-6 justify-items-center">
-            <ChartCard title="각도 분포" chart={
-              <BarChart data={angleData}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis dataKey="angle" />
-                <YAxis />
-                <RechartsTooltip />
-                <Bar dataKey="freq" fill="#5686C4" />
-              </BarChart>
+          {/* 차트 영역 */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+            <ChartCard title="고개 방향 비율" chart={
+              <ResponsiveContainer width="100%" height={250}>
+                <PieChart>
+                  <Pie dataKey="value" nameKey="name" data={analysis.head_pose_ratios ? [
+                    { name: "위", value: analysis.head_pose_ratios.looking_up },
+                    { name: "정면", value: analysis.head_pose_ratios.looking_front },
+                    { name: "아래", value: analysis.head_pose_ratios.looking_down }
+                  ] : []} innerRadius={40} outerRadius={80} label>
+                    <Cell fill="#3b82f6" />
+                    <Cell fill="#10b981" />
+                    <Cell fill="#ef4444" />
+                  </Pie>
+                  <RechartsTooltip />
+                </PieChart>
+              </ResponsiveContainer>
             } />
-            <ChartCard title="눈 깜빡임" chart={
-              <LineChart data={blinkData}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis dataKey="time" />
-                <YAxis />
-                <RechartsTooltip />
-                <Line type="monotone" dataKey="blinks" stroke="#3EB489" strokeWidth={2} />
-              </LineChart>
+            <ChartCard title="Pitch 변화 (도)" chart={
+              <ResponsiveContainer width="100%" height={250}>
+                <LineChart data={analysis.pitch_by_frame}>
+                  <XAxis dataKey="time_sec" />
+                  <YAxis />
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <RechartsTooltip />
+                  <Line type="monotone" dataKey="pitch_deg" stroke="#6366f1" strokeWidth={2} />
+                </LineChart>
+              </ResponsiveContainer>
             } />
-            <ChartCard title="표정 변화" chart={
-              <PieChart>
-                <Pie data={expressionData} dataKey="value" nameKey="expr" innerRadius={40} outerRadius={80} label>
-                  {expressionData.map((entry, i) => (
-                    <Cell key={i} fill={['#826BC6','#5686C4','#3EB489'][i % 3]} />
-                  ))}
-                </Pie>
-                <RechartsTooltip />
-              </PieChart>
+            <ChartCard title="눈 깜빡임 여부" chart={
+              <ResponsiveContainer width="100%" height={250}>
+                <BarChart data={analysis.blink_timeline}>
+                  <XAxis dataKey="frame" />
+                  <YAxis ticks={[0, 1]} />
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <RechartsTooltip />
+                  <Bar dataKey="blink" fill="#3EB489" />
+                </BarChart>
+              </ResponsiveContainer>
             } />
-          </section>
+          </div>
 
+          {/* 눈 깜빡임 요약 */}
+          {blinkSummary && (
+            <div className="bg-white rounded-xl p-6 border border-gray-200 mt-16">
+              <h3 className="text-lg font-semibold text-gray-800 mb-4 flex items-center">💬 눈 깜빡임 요약</h3>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                <SummaryItem label="영상 길이" value={blinkSummary.duration} />
+                <SummaryItem label="깜빡임 수" value={blinkSummary.blink_count} />
+                <SummaryItem label="분당 깜빡임" value={blinkSummary.blinks_per_min} />
+                <SummaryItem label="평가 등급" value={blinkSummary.grade} />
+              </div>
+              <p className="text-sm text-gray-600 mt-4 text-center italic">{blinkSummary.interpretation}</p>
+            </div>
+          )}
+
+          {/* 개선 제안 */}
           {tips.length > 0 && (
-            <section className="mt-12 bg-white p-8 border border-gray-100 rounded-lg">
-              <h3 className="text-xl font-bold text-[#826BC4] mb-4">개선 제안</h3>
-              <ul className="list-disc pl-6 space-y-2 text-gray-700">
-                {tips.map((tip, i) => <li key={i}>{tip}</li>)}
+            <section className="mt-12 bg-white p-6 rounded-xl border border-gray-200">
+              <h3 className="text-lg font-semibold text-gray-800 mb-4 flex items-center">💡 개선 제안</h3>
+              <ul className="space-y-2 text-gray-700 list-disc list-inside text-sm">
+                {tips.map((tip, i) => (
+                  <li key={i} className="leading-relaxed">
+                    <span className="mr-2 text-green-500">✔️</span>{tip}
+                  </li>
+                ))}
               </ul>
             </section>
           )}
 
+          {/* 하단 버튼 */}
           <div className="flex justify-end space-x-4 mt-8">
             <button onClick={handlePlayVideo} className="px-6 py-3 bg-[#3EB489] text-white font-semibold rounded-lg hover:bg-[#36A778] transition">영상 재생</button>
             <button onClick={handleReload} className="px-6 py-3 border border-gray-300 rounded-lg hover:bg-gray-100 transition">다시 분석하기</button>
@@ -171,23 +187,20 @@ export default function AnalysisVideo() {
   );
 }
 
-function SummaryCard({ icon, value, label }) {
+function ChartCard({ title, chart }) {
   return (
-    <div className="p-6 border rounded-lg bg-white text-center">
-      <div className="mx-auto mb-2 w-8 h-8 text-[#5686C4]">{icon}</div>
-      <p className="text-2xl font-bold">{value}</p>
-      <p className="text-gray-500">{label}</p>
+    <div className="p-4 bg-white border rounded-lg w-full">
+      <h4 className="text-md font-semibold text-[#5686C4] mb-2 text-center">{title}</h4>
+      {chart}
     </div>
   );
 }
 
-function ChartCard({ title, chart }) {
+function SummaryItem({ label, value }) {
   return (
-    <div className="p-4 bg-white border border-gray-100 rounded-lg w-full max-w-md">
-      <h4 className="text-md font-semibold text-[#5686C4] mb-2 text-center">{title}</h4>
-      <ResponsiveContainer width="100%" height={300}>
-        {chart}
-      </ResponsiveContainer>
+    <div className="text-center">
+      <p className="text-sm text-gray-500">{label}</p>
+      <p className="text-xl font-semibold text-indigo-600 mt-1">{value}</p>
     </div>
   );
 }
