@@ -2,7 +2,7 @@ import librosa
 import numpy as np
 from core.stt_pronunciation import transcribe_audio, export_differences_to_html
 from utils.text_utils import evaluate_pronunciation
-from core.filler_words import detect_filler_words
+from core.filler_words import detect_filler_words_safe  # 변경된 통합 함수
 from core.pause_ratio_calculator import calculate_pause_ratio
 
 # 음성 불러오기
@@ -25,7 +25,7 @@ def extract_pitch(audio, sr):
     pitches, magnitudes = librosa.piptrack(y=audio, sr=sr)
     pitch_values = pitches[magnitudes > np.median(magnitudes)]
     if len(pitch_values) == 0:
-        return np.array([0])
+        return 0.0, 0.0
     pitch_mean = np.mean(pitch_values)
     pitch_std = np.std(pitch_values)
     return pitch_mean, pitch_std
@@ -53,21 +53,25 @@ def analyze_speech(audio_path, reference_text_path, model, target_wpm=140):
     stt_text, segments = transcribe_audio(audio_path, model)
 
     audio, sr = load_audio(audio_path)
-    if audio is None: return
+    if audio is None:
+        return
 
     # 음성 분석 수행
     mfcc_mean, mfcc_std = extract_mfcc(audio, sr)
     pitch_mean, pitch_std = extract_pitch(audio, sr)
     precise_wpm = estimate_wpm_precise(audio, sr, stt_text)
-    filler_count, filler_occurrences = detect_filler_words(segments)
+
+    # ✅ 간투사 감지 (보완 포함)
+    filler_count, filler_occurrences = detect_filler_words_safe(segments, stt_text)
+
+    # 무음 비율 계산
     pause_ratio = calculate_pause_ratio(audio_path)
 
-    # STT와 대본을 비교하여 발음 정확도 계산
+    # 발음 유사도
     pronunciation_accuracy = evaluate_pronunciation(reference_text, stt_text)
 
     # 분석 결과 출력
-    print(f"\n✅ 발음 유사도 점수 (공백 및 문장 부호 무시): {pronunciation_accuracy * 100:.2f}%")
-    print(f"✅ 음성 분석 결과")
+    print(f"\n✅ 발음 유사도 점수: {pronunciation_accuracy * 100:.2f}%")
     print(f"✅ MFCC 평균: {mfcc_mean}")
     print(f"✅ MFCC 표준편차: {mfcc_std}")
     print(f"✅ Pitch 평균: {pitch_mean:.2f} Hz")
@@ -76,16 +80,11 @@ def analyze_speech(audio_path, reference_text_path, model, target_wpm=140):
     print(f"✅ 무음 구간 비율: {pause_ratio:.2f}")
     print(f"✅ 간투사 수: {filler_count}회")
     if filler_count > 0:
-        print(f"✅ 사용된 간투사: {filler_occurrences}")
+        print(f"✅ 감지된 간투사: {filler_occurrences}")
 
-    # stt 변환 및 발음 분석 결과를 해당 html 파일 경로에 저장
-    output_html_path = "model/speech/results/stt_results.html" 
+    # STT 비교 결과 저장
+    output_html_path = "model/speech/results/stt_results.html"
     export_differences_to_html(reference_text, stt_text, output_html_path)
-
-    """# 음성 분석 후 결과 시각화
-    #plot_mfcc_features(mfcc_mean, mfcc_std)
-    #plot_pitch_summary(pitch_mean, pitch_std)
-    #plot_summary_metrics(precise_wpm, pronunciation_accuracy, filler_count)"""
 
     # 평가 출력
     print("\n[발표 평가]")
