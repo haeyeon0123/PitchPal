@@ -1,2 +1,8 @@
 .env
 venv
+
+# 프론트엔드 캐시 및 빌드 파일 무시
+frontend/node_modules/
+frontend/node_modules/.cache/
+frontend/dist/
+frontend/build/
