@@ -10,7 +10,9 @@
     "react-dom": "^18.0.0",
     "react-router-dom": "^7.6.0",
     "react-scripts": "^5.0.1",
-    "recharts": "^2.15.3"
+    "react-slick": "^0.30.3",
+    "recharts": "^2.15.3",
+    "slick-carousel": "^1.8.1"
   },
   "scripts": {
     "start": "react-scripts start",
