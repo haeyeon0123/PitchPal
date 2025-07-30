@@ -115,24 +115,27 @@ export default function AnalysisContent() {
   return (
     <div className="container mx-auto p-8 space-y-20">
       <div className="max-w-xl mx-auto p-8 border border-gray-200 bg-[#f7f9fc] rounded-lg text-center">
-        <CloudUpload className="mx-auto mb-4 w-12 h-12 text-gray-400" />
-        <h3 className="text-lg font-medium mb-2">파일 업로드</h3>
-        <p className="text-sm text-gray-500 mb-4">.docx, .txt, .pdf 지원</p>
-        {fileName && <p className="text-sm text-gray-600 mb-2">📄 {fileName}</p>}
-        <input
-          type="file"
-          ref={fileInputRef}
-          accept=".docx,.txt,.pdf"
-          className="hidden"
-          onChange={handleFileSelect}
-        />
-        <button
-          onClick={() => fileInputRef.current?.click()}
-          className="px-6 py-3 bg-white rounded-full border border-gray-300 hover:bg-gray-100 transition"
-        >
-          대본 파일 선택
-        </button>
-      </div>
+  <CloudUpload className="mx-auto mb-4 w-12 h-12 text-gray-400" />
+  <h3 className="text-lg font-medium mb-2">파일 업로드</h3>
+  <p className="text-sm text-gray-500 mb-4">.docx, .txt, .pdf 지원</p>
+
+  <input
+    type="file"
+    ref={fileInputRef}
+    accept=".docx,.txt,.pdf"
+    className="hidden"
+    onChange={handleFileSelect}
+  />
+
+  <button
+    onClick={() => fileInputRef.current?.click()}
+    className="px-6 py-3 bg-white rounded-full border border-gray-300 hover:bg-gray-100 transition"
+  >
+    대본 파일 선택
+  </button>
+
+  {fileName && <p className="text-sm text-gray-600 mt-2">📄 {fileName}</p>}
+</div>
 
       {file && progress < 100 && (
         <div className="max-w-xl mx-auto text-center">
