@@ -1,3 +1,4 @@
+// 🔹 필요한 모듈 및 아이콘 import
 import React, { useState, useRef, useEffect } from 'react';
 import {
   Radar, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis,
@@ -9,6 +10,7 @@ import {
 import './Analysis_Voice.css';
 
 export default function AnalysisVoice() {
+  // 🔹 상태 관리
   const [fileInfo, setFileInfo] = useState({ audio: null, script: null, audioUrl: null });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -16,16 +18,19 @@ export default function AnalysisVoice() {
   const [radarData, setRadarData] = useState([]);
   const [progress, setProgress] = useState(0);
 
+  // 🔹 파일 input 및 오디오 참조
   const audioInputRef = useRef(null);
   const scriptInputRef = useRef(null);
   const audioRef = useRef(null);
 
+  // 🔹 파일 업로드되면 자동으로 분석 실행
   useEffect(() => {
     if (fileInfo.audio && fileInfo.script) {
       handleUpload();
     }
   }, [fileInfo.audio, fileInfo.script]);
 
+  // 🔹 업로드 및 더미 분석 처리
   const handleUpload = async () => {
     setError(null);
     setLoading(true);
@@ -66,6 +71,7 @@ export default function AnalysisVoice() {
     }, 1000);
   };
 
+  // 🔹 오디오 재생
   const handleReplay = () => {
     if (audioRef.current) {
       audioRef.current.currentTime = 0;
@@ -73,8 +79,10 @@ export default function AnalysisVoice() {
     }
   };
 
+  // 🔹 다시 분석
   const handleReload = () => window.location.reload();
 
+  // 🔹 레이더 차트 데이터 구성
   useEffect(() => {
     if (result) {
       setRadarData([
@@ -88,6 +96,7 @@ export default function AnalysisVoice() {
     }
   }, [result]);
 
+  // 🔹 개선 팁
   const improvementTips = [
     { title: "발음 정확도", tip: "모음과 자음을 또렷하게 구분해서 발음해보세요." },
     { title: "발화 속도", tip: "너무 빠르지 않게, 청자가 따라올 수 있는 속도를 유지하세요." },
@@ -99,16 +108,13 @@ export default function AnalysisVoice() {
 
   return (
     <div className="container mx-auto p-8 space-y-12">
+      {/* 🔸 파일 업로드 박스 */}
       <div className="max-w-xl mx-auto p-8 border border-gray-200 bg-[#f7f9fc] rounded-lg text-center">
         <Mic className="mx-auto mb-4 w-12 h-12 text-gray-400" />
         <h3 className="text-lg font-medium mb-2">음성 파일 업로드</h3>
         <p className="text-sm text-gray-500 mb-4">.mp3, .wav 파일 업로드 가능</p>
 
-        <input
-          type="file"
-          accept="audio/*"
-          ref={audioInputRef}
-          className="hidden"
+        <input type="file" accept="audio/*" ref={audioInputRef} className="hidden"
           onChange={e => {
             const file = e.target.files[0];
             if (file) {
@@ -116,11 +122,7 @@ export default function AnalysisVoice() {
             }
           }}
         />
-        <input
-          type="file"
-          accept=".txt"
-          ref={scriptInputRef}
-          className="hidden"
+        <input type="file" accept=".txt" ref={scriptInputRef} className="hidden"
           onChange={e => {
             const file = e.target.files[0];
             if (file) {
@@ -130,16 +132,10 @@ export default function AnalysisVoice() {
         />
 
         <div className="flex justify-center gap-4">
-          <button
-            onClick={() => audioInputRef.current?.click()}
-            className="px-6 py-3 bg-white rounded-full border border-gray-300 hover:bg-gray-100 transition"
-          >
+          <button onClick={() => audioInputRef.current?.click()} className="px-6 py-3 bg-white rounded-full border border-gray-300 hover:bg-gray-100 transition">
             음성 파일 선택
           </button>
-          <button
-            onClick={() => scriptInputRef.current?.click()}
-            className="px-6 py-3 bg-white rounded-full border border-gray-300 hover:bg-gray-100 transition"
-          >
+          <button onClick={() => scriptInputRef.current?.click()} className="px-6 py-3 bg-white rounded-full border border-gray-300 hover:bg-gray-100 transition">
             대본 파일 선택
           </button>
         </div>
@@ -151,6 +147,7 @@ export default function AnalysisVoice() {
         )}
       </div>
 
+      {/* 🔸 분석 진행 중 표시 */}
       {loading && (
         <div className="max-w-xl mx-auto text-center">
           <progress value={progress} max="100" className="custom-progress w-full h-2 mb-2" />
@@ -158,8 +155,10 @@ export default function AnalysisVoice() {
         </div>
       )}
 
+      {/* 🔸 에러 메시지 */}
       {error && <div className="text-center text-red-500">{error}</div>}
 
+      {/* 🔸 분석 결과 렌더링 */}
       {result && (
         <ResultSection
           result={result}
@@ -175,21 +174,25 @@ export default function AnalysisVoice() {
   );
 }
 
+// 🔹 분석 결과 섹션
 function ResultSection({ result, audioUrl, audioRef, onReplay, onReload, radarData, improvementTips }) {
   const totalScore = (Object.values(result.scores).reduce((a, b) => a + b, 0) / 6).toFixed(1);
 
   return (
     <div className="space-y-10">
+      {/* 오디오 재생 영역 */}
       {audioUrl && (
         <div className="flex items-center space-x-4 max-w-xl mx-auto">
           <audio ref={audioRef} src={audioUrl} controls className="w-full" />
         </div>
       )}
 
+      {/* 전체 점수 */}
       <div className="text-center text-xl font-semibold text-gray-700">
         🎯 전체 점수: {totalScore} / 5
       </div>
 
+      {/* 항목별 카드 */}
       <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-4 sm:gap-6">
         <ResultCard icon={<CheckCircle />} label="발음 정확도" value={`${(result.features.pronunciation_accuracy * 100).toFixed(1)}%`} />
         <ResultCard icon={<Volume2 />} label="발화 속도" value={`${result.features.wpm?.toFixed(1) ?? 'N/A'} WPM`} />
@@ -199,6 +202,7 @@ function ResultSection({ result, audioUrl, audioRef, onReplay, onReload, radarDa
         <ResultCard icon={<AudioLines />} label="음색 안정성" value={`${result.scores.mfcc?.toFixed(1) ?? 'N/A'} / 5`} />
       </div>
 
+      {/* 레이더 차트 및 개선 팁 */}
       <div className="grid md:grid-cols-2 gap-8">
         <div className="p-4 bg-white border rounded-xl">
           <h4 className="text-md font-bold text-[#826BC4] mb-4 text-center">항목별 종합 점수 (0~5)</h4>
@@ -224,11 +228,13 @@ function ResultSection({ result, audioUrl, audioRef, onReplay, onReload, radarDa
         </div>
       </div>
 
+      {/* 종합 피드백 */}
       <div className="bg-[#fdfdfd] border border-gray-200 rounded-lg p-6">
         <h4 className="text-md font-bold text-[#826BC4] mb-2">📝 종합 피드백</h4>
         <p className="text-gray-800">{result?.feedback ?? '피드백 없음'}</p>
       </div>
 
+      {/* 하단 버튼 */}
       <div className="flex flex-col sm:flex-row justify-center sm:justify-end items-center space-y-3 sm:space-y-0 sm:space-x-4 mt-6">
         <button onClick={onReplay} className="w-full sm:w-auto px-6 py-3 bg-[#4FB8A9] text-white font-semibold rounded-lg hover:bg-[#3fa295] transition">음성 재생</button>
         {result?.stt_html_url && (
@@ -243,6 +249,7 @@ function ResultSection({ result, audioUrl, audioRef, onReplay, onReload, radarDa
   );
 }
 
+// 🔹 결과 카드 컴포넌트
 function ResultCard({ icon, label, value }) {
   return (
     <div className="p-4 bg-white rounded-lg shadow text-center">
