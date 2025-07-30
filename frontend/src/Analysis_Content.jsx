@@ -1,3 +1,5 @@
+// 내용 분석 페이지(더미데이터 Ver.)
+
 import React, { useState, useRef } from 'react';
 import axios from 'axios';
 import {
@@ -11,6 +13,7 @@ import {
 } from 'recharts';
 import './Analysis_Content.css';
 
+// ✅ 더미 데이터: 백엔드 연결 전까지는 mock 데이터를 활용한 테스트용
 const mockResult = {
   stats: { wordCount: 265, errorCount: 7, avgErrors: 0.6 },
   errors: [
@@ -33,6 +36,7 @@ const mockResult = {
 };
 
 export default function AnalysisContent() {
+  // 📌 상태 정의: 파일, 분석 결과, 진행률, 에러 등
   const [file, setFile] = useState(null);
   const [fileName, setFileName] = useState('');
   const [progress, setProgress] = useState(0);
@@ -50,6 +54,7 @@ export default function AnalysisContent() {
   const [openFeedback, setOpenFeedback] = useState({});
   const fileInputRef = useRef(null);
 
+  // 🔄 파일 분석 시작 전 상태 초기화
   const resetStates = () => {
     setStats(null);
     setErrors([]);
@@ -63,6 +68,7 @@ export default function AnalysisContent() {
     setProgress(0);
   };
 
+  // ✅ 분석 결과 파싱 및 상태 업데이트
   const parseResult = (res) => {
     setStats(res.stats);
     setErrors(res.errors);
@@ -75,6 +81,7 @@ export default function AnalysisContent() {
     setChartData(Object.entries(res.feedback).map(([k]) => ({ category: k, score: 4 + Math.random() })));
   };
 
+  // 📁 파일 선택 시 상태 저장 + 업로드 시뮬레이션
   const handleFileSelect = (e) => {
     const selectedFile = e.target.files[0];
     if (!selectedFile) return;
@@ -84,6 +91,7 @@ export default function AnalysisContent() {
     simulateUpload();
   };
 
+  // 🕐 분석 진행률 애니메이션 + 더미 데이터 파싱
   const simulateUpload = () => {
     setLoading(true);
     let current = 0;
@@ -99,11 +107,13 @@ export default function AnalysisContent() {
     }, 1500);
   };
 
+  // 📋 교정된 텍스트 전체 복사
   const handleApplyAll = () => {
     navigator.clipboard.writeText(correctedText);
     alert('교정된 텍스트가 클립보드에 복사되었습니다.');
   };
 
+  // 🧠 아이콘 매핑: 피드백 유형별 시각적 요소 설정
   const iconMap = {
     '일관성': <Repeat className="w-5 h-5 text-blue-500" />,
     '논리성': <Brain className="w-5 h-5 text-indigo-500" />,
@@ -112,31 +122,31 @@ export default function AnalysisContent() {
     '불필요한 내용': <Trash className="w-5 h-5 text-red-500" />,
   };
 
+  // ✅ 실제 렌더링
   return (
     <div className="container mx-auto p-8 space-y-20">
+      {/* 🔽 파일 업로드 박스 */}
       <div className="max-w-xl mx-auto p-8 border border-gray-200 bg-[#f7f9fc] rounded-lg text-center">
-  <CloudUpload className="mx-auto mb-4 w-12 h-12 text-gray-400" />
-  <h3 className="text-lg font-medium mb-2">파일 업로드</h3>
-  <p className="text-sm text-gray-500 mb-4">.docx, .txt, .pdf 지원</p>
+        <CloudUpload className="mx-auto mb-4 w-12 h-12 text-gray-400" />
+        <h3 className="text-lg font-medium mb-2">파일 업로드</h3>
+        <p className="text-sm text-gray-500 mb-4">.docx, .txt, .pdf 지원</p>
+        <input
+          type="file"
+          ref={fileInputRef}
+          accept=".docx,.txt,.pdf"
+          className="hidden"
+          onChange={handleFileSelect}
+        />
+        <button
+          onClick={() => fileInputRef.current?.click()}
+          className="px-6 py-3 bg-white rounded-full border border-gray-300 hover:bg-gray-100 transition"
+        >
+          대본 파일 선택
+        </button>
+        {fileName && <p className="text-sm text-gray-600 mt-2">📄 {fileName}</p>}
+      </div>
 
-  <input
-    type="file"
-    ref={fileInputRef}
-    accept=".docx,.txt,.pdf"
-    className="hidden"
-    onChange={handleFileSelect}
-  />
-
-  <button
-    onClick={() => fileInputRef.current?.click()}
-    className="px-6 py-3 bg-white rounded-full border border-gray-300 hover:bg-gray-100 transition"
-  >
-    대본 파일 선택
-  </button>
-
-  {fileName && <p className="text-sm text-gray-600 mt-2">📄 {fileName}</p>}
-</div>
-
+      {/* 🟡 분석 진행 바 */}
       {file && progress < 100 && (
         <div className="max-w-xl mx-auto text-center">
           <progress value={progress} max="100" className="custom-progress w-full h-2 mb-2" />
@@ -144,18 +154,22 @@ export default function AnalysisContent() {
         </div>
       )}
 
+      {/* 🔴 오류 메시지 */}
       {error && <div className="text-center text-red-500">{error}</div>}
 
+      {/* ✅ 맞춤법 분석 결과 표시 */}
       {progress === 100 && stats && (
         <section className="space-y-10">
           <h2 className="text-2xl font-bold text-[#3A5E88] border-b pb-2">📝 맞춤법 교정 피드백</h2>
 
+          {/* 요약 카드 */}
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-6">
             <SummaryCard icon={<FileText />} value={stats.wordCount} label="총 단어 수" />
             <SummaryCard icon={<Hash />} value={stats.errorCount} label="오류 건수" />
             <SummaryCard icon={<ListChecks />} value={`${stats.avgErrors} /문장`} label="평균 오류" />
           </div>
 
+          {/* 텍스트 탭 (강조/원본/교정본) */}
           <div className="mt-6">
             <div className="flex flex-wrap gap-2 sm:space-x-4 mb-2">
               <TabButton label="교정 강조" tab="highlighted" activeTab={activeTab} setActiveTab={setActiveTab} />
@@ -169,6 +183,7 @@ export default function AnalysisContent() {
             </div>
           </div>
 
+          {/* 오류 리스트 테이블 */}
           {errors.length > 0 && (
             <div className="p-4 bg-white border border-gray-100 rounded-lg overflow-auto min-w-[600px]">
               <table className="w-full text-left">
@@ -194,10 +209,12 @@ export default function AnalysisContent() {
         </section>
       )}
 
+      {/* ✅ 내용 분석 결과 (레이더차트 + 세부 피드백) */}
       {progress === 100 && chartData.length > 0 && (
         <section className="space-y-10">
           <h2 className="text-2xl font-bold text-[#3A5E88] border-b pb-2">🧠 내용 분석 피드백</h2>
 
+          {/* 레이더 차트 */}
           <div className="p-6 bg-white border rounded-lg">
             <h3 className="text-lg font-semibold mb-4 text-center">내용 분석 점수</h3>
             <ResponsiveContainer width="100%" height={300}>
@@ -210,6 +227,7 @@ export default function AnalysisContent() {
             </ResponsiveContainer>
           </div>
 
+          {/* 세부 피드백 카드 */}
           <div className="grid sm:grid-cols-2 gap-4 pt-2">
             {Object.entries(feedback).map(([key, value], idx) => (
               <div key={idx} className="border border-gray-200 rounded-lg shadow-sm transition-all duration-300">
@@ -233,6 +251,7 @@ export default function AnalysisContent() {
             ))}
           </div>
 
+          {/* 하단 버튼들 */}
           <div className="flex flex-col sm:flex-row justify-end gap-2 sm:gap-3 mt-6">
             {htmlLink && (
               <a
@@ -264,6 +283,7 @@ export default function AnalysisContent() {
   );
 }
 
+// ✅ 단어 수 / 오류 수 요약 카드
 function SummaryCard({ icon, value, label }) {
   return (
     <div className="p-6 border rounded-lg bg-white text-center">
@@ -274,6 +294,7 @@ function SummaryCard({ icon, value, label }) {
   );
 }
 
+// ✅ 탭 전환 버튼
 function TabButton({ label, tab, activeTab, setActiveTab }) {
   return (
     <button
