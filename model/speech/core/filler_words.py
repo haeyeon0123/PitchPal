@@ -3,7 +3,7 @@ import re
 
 # 간투사 리스트
 FILLER_WORDS = ["음", "어", "그", "저", "아", "흠", "으음", "어어"]
-MIN_FILLER_DURATION = 0.3  # 간투사로 간주할 최소 지속 시간 (초)
+MIN_FILLER_DURATION = 0.4  # 간투사로 간주할 최소 지속 시간 (초)
 
 def preprocess_word(word):
     """특수 문자 제거 및 소문자 처리"""
