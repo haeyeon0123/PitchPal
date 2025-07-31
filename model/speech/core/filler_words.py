@@ -1,55 +1,45 @@
+import whisper
 import re
 
-def preprocess_word_for_comparison(word):
-    word = word.lower()
-    return re.sub(r'[^\w가-힣]', '', word).strip()
+# 간투사 리스트
+FILLER_WORDS = ["음", "어", "그", "저", "아", "흠", "으음", "어어"]
+MIN_FILLER_DURATION = 0.3  # 간투사로 간주할 최소 지속 시간 (초)
 
-def is_filler_word(word_info, fillers, min_duration=0.3, max_word_len=2):
-    norm_word = preprocess_word_for_comparison(word_info.word)
-    duration = word_info.end - word_info.start
+# 특수 문자 제거 및 소문자 처리
+def preprocess_word(word):
+    return re.sub(r'[^\w가-힣]', '', word.lower()).strip()
 
-    return (
-        norm_word in fillers and
-        len(norm_word) <= max_word_len and
-        duration >= min_duration
-    )
+def is_filler(word_info):
+    word = preprocess_word(word_info['word'])
+    duration = word_info['end'] - word_info['start']
+    return word in FILLER_WORDS and duration >= MIN_FILLER_DURATION
 
-# segment.words 기반 감지
-def detect_filler_words(segments, fillers, min_duration=1):
-    count = 0
-    occurrences = []
+def detect_filler_words(audio_path, model_size="small"):
+    model = whisper.load_model(model_size)
+    result = model.transcribe(audio_path, word_timestamps=True)
 
-    for segment in segments:
-        for word_info in getattr(segment, "words", []):
-            if is_filler_word(word_info, fillers, min_duration):
-                norm_word = preprocess_word_for_comparison(word_info.word)
-                occurrences.append((norm_word, word_info.start, word_info.end))
-                count += 1
-    return count, occurrences
+    if "segments" not in result:
+        raise ValueError("Transcription result does not contain 'segments'.")
 
-def detect_fillers_from_text(text, fillers):
-    count = 0
-    occurrences = []
+    filler_occurrences = []
 
-    # word boundary를 고려한 정규식
-    pattern = r'\b(' + '|'.join([re.escape(f) for f in fillers]) + r')\b'
-    matches = re.finditer(pattern, text)
+    for segment in result["segments"]:
+        for word_info in segment["words"]:
+            if is_filler(word_info):
+                filler_occurrences.append({
+                    "word": word_info["word"],
+                    "start": word_info["start"],
+                    "end": word_info["end"],
+                    "duration": round(word_info["end"] - word_info["start"], 2)
+                })
 
-    for match in matches:
-        word = match.group()
-        occurrences.append((word, match.start(), match.end()))
-        count += 1
+    filler_count = len(filler_occurrences)
+    return filler_count, filler_occurrences
 
-    return count, occurrences
-
-# 완성형: segment.words 실패 시 text fallback
-def detect_filler_words_safe(segments, stt_text, fillers=None, min_duration=0.3):
-    if fillers is None:
-        fillers = ["음", "어", "그", "저", "이", "아", "흠", "으음", "어어"]
-
-    count, occurrences = detect_filler_words(segments, fillers, min_duration)
-    if count > 0:
-        return count, occurrences
-
-    print("⚠️ 단어 기반 간투사 감지 실패 → 텍스트 기반 보완 감지 실행")
-    return detect_fillers_from_text(stt_text, fillers)
+# 예시 실행
+if __name__ == "__main__":
+    audio_path = "data/test1.m4a"  # 경로에 맞게 수정
+    filler_count, fillers = detect_filler_words(audio_path)
+    print(f"감지된 간투사 개수: {filler_count}")
+    for f in fillers:
+        print(f"👉 '{f['word']}' at {f['start']}s ~ {f['end']}s (⏱ {f['duration']}s)")
