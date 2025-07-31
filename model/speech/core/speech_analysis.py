@@ -47,30 +47,24 @@ def analyze_speech(audio_path, reference_text_path, model, target_wpm=140):
             reference_text = f.read()
     except Exception as e:
         print(f"❌ 대본 로딩 실패: {e}")
-        return
+        return None
 
     # STT 수행
     stt_text, segments = transcribe_audio(audio_path, model)
 
     audio, sr = load_audio(audio_path)
     if audio is None:
-        return
+        return None
 
-    # 음성 분석 수행
+    # 음성 분석
     mfcc_mean, mfcc_std = extract_mfcc(audio, sr)
     pitch_mean, pitch_std = extract_pitch(audio, sr)
     precise_wpm = estimate_wpm_precise(audio, sr, stt_text)
-
-    # ✅ 간투사 감지 (보완 포함)
     filler_count, filler_occurrences = detect_filler_words_safe(segments, stt_text)
-
-    # 무음 비율 계산
     pause_ratio = calculate_pause_ratio(audio_path)
-
-    # 발음 유사도
     pronunciation_accuracy = evaluate_pronunciation(reference_text, stt_text)
 
-    # 분석 결과 출력
+    # 결과 출력 (콘솔 확인용)
     print(f"\n✅ 발음 유사도 점수: {pronunciation_accuracy * 100:.2f}%")
     print(f"✅ MFCC 평균: {mfcc_mean}")
     print(f"✅ MFCC 표준편차: {mfcc_std}")
@@ -82,11 +76,11 @@ def analyze_speech(audio_path, reference_text_path, model, target_wpm=140):
     if filler_count > 0:
         print(f"✅ 감지된 간투사: {filler_occurrences}")
 
-    # STT 비교 결과 저장
+    # HTML 비교 결과 저장
     output_html_path = "model/speech/results/stt_results.html"
     export_differences_to_html(reference_text, stt_text, output_html_path)
 
-    # 평가 출력
+    # 발표 평가 요약
     print("\n[발표 평가]")
     if pronunciation_accuracy > 0.8 and pitch_mean > 70 and precise_wpm > 100 and filler_count < 5:
         print("✅ 발음, 억양, 속도 모두 잘 조화되어 있습니다! 발표가 자연스럽습니다.")
@@ -94,3 +88,10 @@ def analyze_speech(audio_path, reference_text_path, model, target_wpm=140):
         print("🔶 발음은 괜찮습니다. 억양 또는 추임새, 속도에 조금 더 주의해주세요.")
     else:
         print("❌ 발음과 억양, 속도 전반에 개선이 필요합니다. 꾸준한 연습이 도움이 됩니다.")
+
+    # ✅ 회귀 예측용 피처 반환
+    return {
+        "wpm": precise_wpm,
+        "pause_ratio": pause_ratio,
+        "pron_score": pronunciation_accuracy * 100
+    }
