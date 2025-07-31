@@ -2,7 +2,7 @@ import librosa
 import numpy as np
 from core.stt_pronunciation import transcribe_audio, export_differences_to_html
 from utils.text_utils import evaluate_pronunciation
-from core.filler_words import detect_filler_words_safe  # 변경된 통합 함수
+from core.filler_words import detect_filler_words  
 from core.pause_ratio_calculator import calculate_pause_ratio
 
 # 음성 불러오기
@@ -60,7 +60,7 @@ def analyze_speech(audio_path, reference_text_path, model, target_wpm=140):
     mfcc_mean, mfcc_std = extract_mfcc(audio, sr)
     pitch_mean, pitch_std = extract_pitch(audio, sr)
     precise_wpm = estimate_wpm_precise(audio, sr, stt_text)
-    filler_count, filler_occurrences = detect_filler_words_safe(segments, stt_text)
+    filler_count, filler_occurrences = detect_filler_words(segments, stt_text)
     pause_ratio = calculate_pause_ratio(audio_path)
     pronunciation_accuracy = evaluate_pronunciation(reference_text, stt_text)
 
