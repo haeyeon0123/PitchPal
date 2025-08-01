@@ -1,6 +1,5 @@
 torch
 torchaudio
-librosa
 matplotlib
 SpeechRecognition
 fastapi
@@ -11,7 +10,6 @@ python-multipart
 urllib3
 opencv_python
 Keras==2.3.1
-pandas==0.25.3
 numpy==1.17.4
 imutils==0.5.3
 scikit_learn==0.22.1
@@ -19,3 +17,7 @@ openai
 dotenv
 faster_whisper
 pydub
+librosa
+pandas
+scikit-learn
+joblib

@@ -1,55 +1,45 @@
+import whisper
 import re
 
-def preprocess_word_for_comparison(word):
-    word = word.lower()
-    return re.sub(r'[^\w가-힣]', '', word).strip()
+# 간투사 리스트
+FILLER_WORDS = ["음", "어", "그", "저", "아", "흠", "으음", "어어"]
+MIN_FILLER_DURATION = 0.3  # 간투사로 간주할 최소 지속 시간 (초)
 
-def is_filler_word(word_info, fillers, min_duration=0.3, max_word_len=2):
-    norm_word = preprocess_word_for_comparison(word_info.word)
+def preprocess_word(word):
+    """특수 문자 제거 및 소문자 처리"""
+    return re.sub(r'[^\w가-힣]', '', word.lower()).strip()
+
+def is_filler(word_info):
+    word = preprocess_word(word_info.word)  # ✅ 객체 속성 접근
     duration = word_info.end - word_info.start
+    return word in FILLER_WORDS and duration >= MIN_FILLER_DURATION
 
-    return (
-        norm_word in fillers and
-        len(norm_word) <= max_word_len and
-        duration >= min_duration
-    )
+def detect_filler_words(audio_path, stt_text, model):
+    segments, _ = model.transcribe(audio_path, word_timestamps=True)
 
-# segment.words 기반 감지
-def detect_filler_words(segments, fillers, min_duration=1):
-    count = 0
-    occurrences = []
+    filler_occurrences = []
+
+    # 1차: Whisper word timestamps 기반 감지
+    segments = list(segments)
 
     for segment in segments:
         for word_info in getattr(segment, "words", []):
-            if is_filler_word(word_info, fillers, min_duration):
-                norm_word = preprocess_word_for_comparison(word_info.word)
-                occurrences.append((norm_word, word_info.start, word_info.end))
-                count += 1
-    return count, occurrences
+            if is_filler(word_info):
+                filler_occurrences.append({
+                    "word": word_info.word,
+                    "start": word_info.start,
+                    "end": word_info.end,
+                    "duration": round(word_info.end - word_info.start, 2)
+                })
 
-def detect_fillers_from_text(text, fillers):
-    count = 0
-    occurrences = []
+    filler_count = len(filler_occurrences)
 
-    # word boundary를 고려한 정규식
-    pattern = r'\b(' + '|'.join([re.escape(f) for f in fillers]) + r')\b'
-    matches = re.finditer(pattern, text)
-
-    for match in matches:
-        word = match.group()
-        occurrences.append((word, match.start(), match.end()))
-        count += 1
-
-    return count, occurrences
-
-# 완성형: segment.words 실패 시 text fallback
-def detect_filler_words_safe(segments, stt_text, fillers=None, min_duration=0.3):
-    if fillers is None:
-        fillers = ["음", "어", "그", "저", "이", "아", "흠", "으음", "어어"]
-
-    count, occurrences = detect_filler_words(segments, fillers, min_duration)
-    if count > 0:
+    # 2차: 감지 실패 시 텍스트 기반 보완 감지
+    if filler_count == 0:
+        pattern = r'\b(음|어|그\.\.\.|저\.\.\.|아|흠|으음|어어|이\.\.\.)\b'
+        matches = re.findall(pattern, stt_text)
+        count = len(matches)
+        occurrences = [(match, None, None) for match in matches]  # 시간 정보는 없음
         return count, occurrences
-
-    print("⚠️ 단어 기반 간투사 감지 실패 → 텍스트 기반 보완 감지 실행")
-    return detect_fillers_from_text(stt_text, fillers)
+    
+    return filler_count, filler_occurrences

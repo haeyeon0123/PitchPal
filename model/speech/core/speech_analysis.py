@@ -1,235 +1,97 @@
-import React, { useState, useRef } from 'react';
-import {
-  CheckCircle, Volume2, Activity,
-  PauseCircle, Slash
-} from 'lucide-react';
-import {
-  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer
-} from 'recharts';
+import librosa
+import numpy as np
+from core.stt_pronunciation import transcribe_audio, export_differences_to_html
+from utils.text_utils import evaluate_pronunciation
+from core.filler_words import detect_filler_words  
+from core.pause_ratio_calculator import calculate_pause_ratio
 
-const dummyResult = {
-  pronunciation_accuracy: 0.84,
-  pitch_mean: 98.3,
-  pitch_std: 15.2,
-  mfcc_mean: [12.3, 18.2, 20.1, 19.0],
-  mfcc_std: [2.5, 2.8, 3.1, 2.7],
-  wpm: 134.5,
-  pause_ratio: 0.13,
-  filler_count: 3,
-  feedback: "전반적으로 자연스럽고 명확한 발음이었습니다. 약간의 억양 변화만 보완하면 좋습니다!",
-  stt_html_url: "model/speech/results/stt_results.html"
-};
+# 음성 불러오기
+def load_audio(audio_path):
+    try:
+        return librosa.load(audio_path, sr=16000)
+    except Exception as e:
+        print(f"❌ 음성 파일 로딩 실패: {e}")
+        return None, None
 
-export default function AnalysisVoice() {
-  const [audioFile, setAudioFile] = useState(null);
-  const [scriptFile, setScriptFile] = useState(null);
-  const [audioUrl, setAudioUrl] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(null);
-  const [result, setResult] = useState(null);
+# mfcc 추출
+def extract_mfcc(audio, sr):
+    mfccs = librosa.feature.mfcc(y=audio, sr=sr, n_mfcc=13)
+    mfccs_mean = np.mean(mfccs.T, axis=0)
+    mfccs_std = np.std(mfccs.T, axis=0)
+    return mfccs_mean, mfccs_std
 
-  const audioInputRef = useRef(null);
-  const scriptInputRef = useRef(null);
-  const audioRef = useRef(null);
+# pitch 추출
+def extract_pitch(audio, sr):
+    pitches, magnitudes = librosa.piptrack(y=audio, sr=sr)
+    pitch_values = pitches[magnitudes > np.median(magnitudes)]
+    if len(pitch_values) == 0:
+        return 0.0, 0.0
+    pitch_mean = np.mean(pitch_values)
+    pitch_std = np.std(pitch_values)
+    return pitch_mean, pitch_std
 
-  const handleUpload = async () => {
-    if (!audioFile || !scriptFile) {
-      setError("음성 파일과 대본 파일을 모두 업로드해주세요.");
-      return;
+# 침묵 제거 후 실제 발화 시간 기반 WPM 계산
+def estimate_wpm_precise(audio, sr, text):
+    non_silent_intervals = librosa.effects.split(audio, top_db=30)
+    active_speech_duration_sec = sum((end - start) for start, end in non_silent_intervals) / sr
+    if active_speech_duration_sec == 0:
+        return 0.0
+    word_count = len(text.split())
+    wpm = (word_count / active_speech_duration_sec) * 60
+    return wpm
+
+# 음성 전체 분석 및 STT 변환 실행
+def analyze_speech(audio_path, reference_text_path, model, target_wpm=140):
+    try:
+        with open(reference_text_path, 'r', encoding='utf-8') as f:
+            reference_text = f.read()
+    except Exception as e:
+        print(f"❌ 대본 로딩 실패: {e}")
+        return None
+
+    # STT 수행
+    stt_text, segments = transcribe_audio(audio_path, model)
+
+    audio, sr = load_audio(audio_path)
+    if audio is None:
+        return None
+
+    # 음성 분석
+    mfcc_mean, mfcc_std = extract_mfcc(audio, sr)
+    pitch_mean, pitch_std = extract_pitch(audio, sr)
+    precise_wpm = estimate_wpm_precise(audio, sr, stt_text)
+    filler_count, filler_occurrences = detect_filler_words(segments, stt_text)
+    pause_ratio = calculate_pause_ratio(audio_path)
+    pronunciation_accuracy = evaluate_pronunciation(reference_text, stt_text)
+
+    # 결과 출력 (콘솔 확인용)
+    print(f"\n✅ 발음 유사도 점수: {pronunciation_accuracy * 100:.2f}%")
+    print(f"✅ MFCC 평균: {mfcc_mean}")
+    print(f"✅ MFCC 표준편차: {mfcc_std}")
+    print(f"✅ Pitch 평균: {pitch_mean:.2f} Hz")
+    print(f"✅ Pitch 표준편차: {pitch_std:.2f} Hz")
+    print(f"✅ Words Per Minute(WPM): {precise_wpm:.2f}")
+    print(f"✅ 무음 구간 비율: {pause_ratio:.2f}")
+    print(f"✅ 간투사 수: {filler_count}회")
+    if filler_count > 0:
+        print(f"✅ 감지된 간투사: {filler_occurrences}")
+
+    # HTML 비교 결과 저장
+    output_html_path = "model/speech/results/stt_results.html"
+    export_differences_to_html(reference_text, stt_text, output_html_path)
+
+    # 발표 평가 요약
+    print("\n[발표 평가]")
+    if pronunciation_accuracy > 0.8 and pitch_mean > 70 and precise_wpm > 100 and filler_count < 5:
+        print("✅ 발음, 억양, 속도 모두 잘 조화되어 있습니다! 발표가 자연스럽습니다.")
+    elif pronunciation_accuracy > 0.6:
+        print("🔶 발음은 괜찮습니다. 억양 또는 추임새, 속도에 조금 더 주의해주세요.")
+    else:
+        print("❌ 발음과 억양, 속도 전반에 개선이 필요합니다. 꾸준한 연습이 도움이 됩니다.")
+
+    # ✅ 회귀 예측용 피처 반환
+    return {
+        "wpm": precise_wpm,
+        "pause_ratio": pause_ratio,
+        "pron_score": pronunciation_accuracy * 100
     }
-
-    setError(null);
-    setLoading(true);
-    setResult(null);
-
-    setTimeout(() => {
-      setResult(dummyResult);
-      setLoading(false);
-    }, 1000);
-  };
-
-  const handleReplay = () => {
-    if (audioRef.current) {
-      audioRef.current.currentTime = 0;
-      audioRef.current.play();
-    }
-  };
-
-  const handleReload = () => window.location.reload();
-
-  const mfccChartData = result?.mfcc_mean?.map((val, i) => ({
-    index: `MFCC ${i + 1}`,
-    평균: val,
-    표준편차: result.mfcc_std[i]
-  })) || [];
-
-  const pitchChartData = [{
-    항목: 'Pitch',
-    평균: result?.pitch_mean,
-    표준편차: result?.pitch_std
-  }];
-
-  return (
-    <div className="container mx-auto p-8 space-y-12">
-      {/* 📁 업로드 박스 */}
-      <div className="max-w-xl mx-auto bg-[#f7f9fc] border border-gray-200 rounded-xl p-8 text-center space-y-4">
-        <h3 className="text-lg font-semibold text-gray-800">파일 업로드</h3>
-        <p className="text-sm text-gray-500">.mp3, .wav, .txt 파일 업로드 가능</p>
-
-        {/* 🎤 + 📄 파일 선택 버튼: 나란히 정렬 */}
-        <div className="flex justify-center space-x-4">
-          <div>
-            <input type="file" ref={audioInputRef} accept="audio/*" className="hidden"
-              onChange={e => {
-                const file = e.target.files[0];
-                if (file) {
-                  setAudioFile(file);
-                  setAudioUrl(URL.createObjectURL(file));
-                }
-              }}
-            />
-            <button onClick={() => audioInputRef.current?.click()} className="px-6 py-2 bg-white border border-gray-300 rounded-full hover:bg-gray-100 transition">
-              음성 파일 선택
-            </button>
-          </div>
-
-          <div>
-            <input type="file" ref={scriptInputRef} accept=".txt" className="hidden"
-              onChange={e => {
-                const file = e.target.files[0];
-                if (file) setScriptFile(file);
-              }}
-            />
-            <button onClick={() => scriptInputRef.current?.click()} className="px-6 py-2 bg-white border border-gray-300 rounded-full hover:bg-gray-100 transition">
-              대본 파일 선택
-            </button>
-          </div>
-        </div>
-
-        {/* 선택한 파일 이름 */}
-        {audioFile && scriptFile && (
-          <p className="text-sm text-gray-500 mt-2">
-            🎧 {audioFile.name} + 📝 {scriptFile.name}
-          </p>
-        )}
-
-        {/* ✅ 분석 시작 버튼 */}
-        <div className="mt-4">
-          <button
-            onClick={handleUpload}
-            className="px-6 py-3 bg-[#6EAED5] text-white rounded-full hover:bg-[#5a9bc8] transition font-semibold"
-          >
-            분석 시작
-          </button>
-        </div>
-      </div>
-
-      {/* 🔄 분석 중 표시 */}
-      {loading && (
-        <div className="text-center text-sm text-gray-600">
-          분석 중...
-        </div>
-      )}
-
-      {/* ❌ 에러 표시 */}
-      {error && (
-        <div className="text-center text-red-500">
-          {error}
-        </div>
-      )}
-
-      {/* ✅ 분석 결과 */}
-      {result && (
-        <div className="space-y-10">
-          {/* 🎧 오디오 플레이어 */}
-          {audioUrl && (
-            <div className="flex items-center space-x-4 max-w-xl mx-auto">
-              <audio ref={audioRef} src={audioUrl} controls className="w-full" />
-            </div>
-          )}
-
-          {/* 📊 분석 결과 카드 (4개만) */}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
-            <ResultCard icon={<CheckCircle />} label="발음 유사도" value={`${(result.pronunciation_accuracy * 100).toFixed(1)}%`} />
-            <ResultCard icon={<PauseCircle />} label="무음 비율" value={`${(result.pause_ratio * 100).toFixed(1)}%`} />
-            <ResultCard icon={<Slash />} label="간투사 수" value={`${result.filler_count}회`} />
-            <ResultCard icon={<Volume2 />} label="WPM" value={`${result.wpm?.toFixed(1)}`} />
-          </div>
-
-          {/* 📈 MFCC & Pitch 비교 그래프 */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            {/* MFCC */}
-            <div className="p-4 bg-white border rounded-lg">
-              <h4 className="text-md font-semibold text-[#826BC4] mb-2 text-center">MFCC 평균 vs 표준편차</h4>
-              <ResponsiveContainer width="100%" height={200}>
-                <BarChart data={mfccChartData}>
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="index" />
-                  <YAxis />
-                  <Tooltip />
-                  <Bar dataKey="평균" fill="#6EAED5" />
-                  <Bar dataKey="표준편차" fill="#C6DDF2" />
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-
-            {/* Pitch */}
-            <div className="p-4 bg-white border rounded-lg">
-              <h4 className="text-md font-semibold text-[#826BC4] mb-2 text-center">Pitch 평균 vs 표준편차</h4>
-              <ResponsiveContainer width="100%" height={200}>
-                <BarChart data={pitchChartData}>
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="항목" />
-                  <YAxis />
-                  <Tooltip />
-                  <Bar dataKey="평균" fill="#6EAED5" />
-                  <Bar dataKey="표준편차" fill="#C6DDF2" />
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          </div>
-
-          {/* 💬 종합 피드백 */}
-          <div className="bg-[#fdfdfd] border border-gray-200 rounded-lg p-6">
-            <h4 className="text-md font-bold text-[#826BC4] mb-2">📝 종합 피드백</h4>
-            <p className="text-gray-800">{result.feedback}</p>
-          </div>
-
-          {/* 🔳 버튼 3개: 음성 재생 / 발음 분석 결과 / 다시 분석 */}
-          <div className="flex justify-end space-x-4 mt-8">
-            <button
-              onClick={handleReplay}
-              className="px-6 py-3 bg-[#3EB489] text-white rounded-lg hover:bg-[#2fa077] transition"
-            >
-              음성 재생
-            </button>
-            <a
-              href={result.stt_html_url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="px-6 py-3 bg-[#6B8DD6] text-white rounded-lg hover:bg-[#5574bb] transition"
-            >
-              발음 분석 결과
-            </a>
-            <button
-              onClick={handleReload}
-              className="px-6 py-3 border border-gray-300 rounded-lg hover:bg-gray-100 transition"
-            >
-              다시 분석하기
-            </button>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function ResultCard({ icon, label, value }) {
-  return (
-    <div className="p-4 bg-white rounded-lg shadow text-center">
-      <div className="mb-1 text-[#5686C4] mx-auto w-6 h-6">{icon}</div>
-      <p className="text-lg font-semibold">{value}</p>
-      <p className="text-sm text-gray-500">{label}</p>
-    </div>
-  );
-}
