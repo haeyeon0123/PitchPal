@@ -88,10 +88,3 @@ def analyze_speech(audio_path, reference_text_path, model, target_wpm=140):
         print("🔶 발음은 괜찮습니다. 억양 또는 추임새, 속도에 조금 더 주의해주세요.")
     else:
         print("❌ 발음과 억양, 속도 전반에 개선이 필요합니다. 꾸준한 연습이 도움이 됩니다.")
-
-    # ✅ 회귀 예측용 피처 반환
-    return {
-        "wpm": precise_wpm,
-        "pause_ratio": pause_ratio,
-        "pron_score": pronunciation_accuracy * 100
-    }
