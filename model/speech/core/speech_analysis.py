@@ -66,8 +66,8 @@ def analyze_speech(audio_path, reference_text_path, model, target_wpm=140):
 
     # 결과 출력 (콘솔 확인용)
     print(f"\n✅ 발음 유사도 점수: {pronunciation_accuracy * 100:.2f}%")
-    print(f"✅ MFCC 평균: {mfcc_mean}")
-    print(f"✅ MFCC 표준편차: {mfcc_std}")
+    print(f"✅ MFCC 평균: {np.mean(mfcc_mean)}")
+    print(f"✅ MFCC 표준편차: {np.mean(mfcc_std)}")
     print(f"✅ Pitch 평균: {pitch_mean:.2f} Hz")
     print(f"✅ Pitch 표준편차: {pitch_std:.2f} Hz")
     print(f"✅ Words Per Minute(WPM): {precise_wpm:.2f}")
