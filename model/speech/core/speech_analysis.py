@@ -49,8 +49,10 @@ def analyze_speech(audio_path, reference_text_path, model, target_wpm=140):
         print(f"❌ 대본 로딩 실패: {e}")
         return None
 
-    # STT 수행
     stt_text, segments = transcribe_audio(audio_path, model)
+    if not stt_text or segments is None:
+        print("❌ STT 실패 또는 결과 없음")
+        return None
 
     audio, sr = load_audio(audio_path)
     if audio is None:
@@ -64,10 +66,10 @@ def analyze_speech(audio_path, reference_text_path, model, target_wpm=140):
     pause_ratio = calculate_pause_ratio(audio_path)
     pronunciation_accuracy = evaluate_pronunciation(reference_text, stt_text)
 
-    # 결과 출력 (콘솔 확인용)
+    # 결과 출력
     print(f"\n✅ 발음 유사도 점수: {pronunciation_accuracy * 100:.2f}%")
-    print(f"✅ MFCC 평균: {np.mean(mfcc_mean)}")
-    print(f"✅ MFCC 표준편차: {np.mean(mfcc_std)}")
+    print(f"✅ MFCC 평균: {np.mean(mfcc_mean):.2f}")
+    print(f"✅ MFCC 표준편차: {np.mean(mfcc_std):.2f}")
     print(f"✅ Pitch 평균: {pitch_mean:.2f} Hz")
     print(f"✅ Pitch 표준편차: {pitch_std:.2f} Hz")
     print(f"✅ Words Per Minute(WPM): {precise_wpm:.2f}")
@@ -88,3 +90,15 @@ def analyze_speech(audio_path, reference_text_path, model, target_wpm=140):
         print("🔶 발음은 괜찮습니다. 억양 또는 추임새, 속도에 조금 더 주의해주세요.")
     else:
         print("❌ 발음과 억양, 속도 전반에 개선이 필요합니다. 꾸준한 연습이 도움이 됩니다.")
+
+    # 분석 결과 반환
+    return {
+        "발음 유사도 점수": pronunciation_accuracy,
+        "MFCC 평균": mfcc_mean,
+        "MFCC 표준편차": mfcc_std,
+        "Pitch 평균": pitch_mean,
+        "Pitch 표준편차": pitch_std,
+        "WPM": precise_wpm,
+        "무음 구간 비율": pause_ratio,
+        "간투사 수": filler_count
+    }
