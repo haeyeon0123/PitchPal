@@ -14,9 +14,7 @@ def is_filler(word_info):
     duration = word_info.end - word_info.start
     return word in FILLER_WORDS and duration >= MIN_FILLER_DURATION
 
-def detect_filler_words(audio_path, stt_text, model):
-    segments, _ = model.transcribe(audio_path, word_timestamps=True)
-
+def detect_filler_words(segments, stt_text):
     filler_occurrences = []
 
     # 1차: Whisper word timestamps 기반 감지

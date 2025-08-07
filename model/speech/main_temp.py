@@ -1,11 +1,22 @@
 from core.stt_pronunciation import transcribe_audio, load_whisper_model
 from core.filler_words import detect_filler_words
+from core.speech_analysis import analyze_speech, save_segment_features_to_csv
+import time
 
 if __name__ == "__main__":
-    audio_path = "data/test3.m4a"  # 경로에 맞게 수정
+    start = time.time()
+    audio_path = "data/pitch_sample.m4a"
+    script_path = "data/pitch_sample_script.txt"
+    model = load_whisper_model("small")
 
-    model = load_whisper_model('small')
+    output_path = "model/speech/results/segments_results.csv"
 
+    features = analyze_speech(audio_path, script_path, model)
+    save_segment_features_to_csv(features["segments"], output_path)
+
+    print(f"\n⏱ 총 실행 시간: {time.time() - start:.2f}초")
+
+    """
     # STT 수행
     stt_text, segments = transcribe_audio(audio_path, model)
 
@@ -15,4 +26,4 @@ if __name__ == "__main__":
     for f in fillers:
         print(f"👉 '{f['word']}' at {f['start']}s ~ {f['end']}s (⏱ {f['duration']}s)")
     
-    print(f"\nstt 텍스트: {stt_text}")
+    print(f"\nstt 텍스트: {stt_text}")"""
