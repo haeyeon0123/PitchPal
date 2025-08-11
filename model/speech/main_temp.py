@@ -1,6 +1,6 @@
 from core.stt_pronunciation import transcribe_audio, load_whisper_model
 from core.filler_words import detect_filler_words
-from core.speech_analysis import analyze_speech, save_segment_features_to_csv
+from core.speech_analysis import analyze_speech, save_segment_features_to_json
 import time
 
 if __name__ == "__main__":
@@ -9,10 +9,10 @@ if __name__ == "__main__":
     script_path = "data/pitch_sample_script.txt"
     model = load_whisper_model("small")
 
-    output_path = "model/speech/results/segments_results.csv"
+    output_path = "model/speech/results/segments_results.json"
 
     features = analyze_speech(audio_path, script_path, model)
-    save_segment_features_to_csv(features["segments"], output_path)
+    save_segment_features_to_json(features["segments"], output_path)
 
     print(f"\n⏱ 총 실행 시간: {time.time() - start:.2f}초")
 

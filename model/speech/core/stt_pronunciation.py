@@ -23,6 +23,7 @@ def print_word_level_output(audio_path, model):
 def transcribe_audio(audio_path, model):
     try:
         segments, _ = model.transcribe(audio_path, word_timestamps=True)
+        segments = list(segments)  # ✅ 제너레이터 → 리스트로 물질화 (다회 사용)
         stt_text = " ".join([seg.text.strip() for seg in segments])
         return stt_text, segments
     except Exception as e:

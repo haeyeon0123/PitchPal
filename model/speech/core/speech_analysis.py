@@ -1,6 +1,6 @@
 import librosa
 import numpy as np
-import csv
+import json
 from core.stt_pronunciation import transcribe_audio, export_differences_to_html
 from utils.text_utils import evaluate_pronunciation
 from core.filler_words import detect_filler_words  
@@ -29,6 +29,18 @@ def segment_audio(audio, sr, segment_duration=5.0):
 
     return segments
 
+# 구간별 stt 매핑
+def match_stt_to_segments(segments, segment_times):
+    matched_texts = []
+    for start_time, end_time in segment_times:
+        words_in_segment = []
+        for segment in segments:
+            for word_info in getattr(segment, "words", []):
+                if start_time <= word_info.start < end_time:
+                    words_in_segment.append(word_info.word)
+        matched_texts.append(" ".join(words_in_segment).strip())
+    return matched_texts
+
 # mfcc 추출
 def extract_mfcc(audio, sr):
     mfccs = librosa.feature.mfcc(y=audio, sr=sr, n_mfcc=13)
@@ -56,20 +68,21 @@ def estimate_wpm_precise(audio, sr, text):
     wpm = (word_count / active_speech_duration_sec) * 60
     return wpm
 
-def save_segment_features_to_csv(segment_features, output_path):
+def _to_jsonable(obj):
+    import numpy as _np
+    if isinstance(obj, (_np.integer,)):  # np.int32 등
+        return int(obj)
+    if isinstance(obj, (_np.floating,)): # np.float32/64 등
+        return float(obj)
+    if isinstance(obj, _np.ndarray):     # 배열
+        return obj.tolist()
+    return obj
 
-    with open(output_path, mode="w", encoding="utf-8", newline='') as f:
-        writer = csv.writer(f)
-        # 헤더 작성
-        header = ["time_range", "wpm", "pitch_mean"] + [f"mfcc_{i+1}" for i in range(len(segment_features[0]['mfcc_mean']))]
-        writer.writerow(header)
+def save_segment_features_to_json(segment_features, output_path):
+    with open(output_path, mode="w", encoding="utf-8") as f:
+        json.dump(segment_features, f, ensure_ascii=False, indent=4, default=_to_jsonable)
+    print(f"✅ 구간별 피처가 JSON으로 저장되었습니다: {output_path}")
 
-        # 데이터 작성
-        for segment in segment_features:
-            row = [segment["time_range"], segment["wpm"], segment["pitch_mean"]] + segment["mfcc_mean"]
-            writer.writerow(row)
-
-    print(f"✅ 구간별 피처가 CSV로 저장되었습니다: {output_path}")
 
 # 음성 전체 분석 및 STT 변환 실행
 def analyze_speech(audio_path, reference_text_path, model, segment_duration=5.0):
@@ -92,24 +105,27 @@ def analyze_speech(audio_path, reference_text_path, model, segment_duration=5.0)
     
     # 오디오를 일정 길이로 분할
     audio_segments = segment_audio(audio, sr, segment_duration)
+    segment_times = [(start, end) for (_, start, end) in audio_segments]
+    segment_stt_texts = match_stt_to_segments(segments, segment_times)
 
     # 구간별 피처 저장
     mfcc_means, pitch_means, wpms = [], [], []
     segment_features = []
 
-    for segment, start_time, end_time in audio_segments:
+    for i, (segment, start_time, end_time) in enumerate(audio_segments):
         mfcc_mean, mfcc_std = extract_mfcc(segment, sr)
         pitch_mean, pitch_std = extract_pitch(segment, sr)
-        segment_text = stt_text  # 기본적으로 전체 텍스트를 사용 (이후 개선 가능)
+        segment_text = segment_stt_texts[i]
         wpm = estimate_wpm_precise(segment, sr, segment_text)
 
         time_range_str = f"{start_time:05.2f}-{end_time:05.2f}"
 
         segment_features.append({
             "time_range": time_range_str,
-            "wpm": wpm,
-            "pitch_mean": pitch_mean,
-            "mfcc_mean": mfcc_mean.tolist()  # JSON 직렬화 대비
+            "stt_text": segment_text,
+            "wpm": float(wpm),                
+            "pitch_mean": float(pitch_mean),
+            "mfcc_mean": mfcc_mean.tolist()
         })
 
         # 전체 평균용 리스트
@@ -137,7 +153,6 @@ def analyze_speech(audio_path, reference_text_path, model, segment_duration=5.0)
     print(f"✅ MFCC 평균: {avg_mfcc_mean}")
     print(f"✅ MFCC 표준편차: {mfcc_std}")
     print(f"✅ Pitch 평균: {avg_pitch_mean:.2f} Hz")
-
     print(f"✅ Pitch 표준편차: {pitch_std:.2f} Hz")
     print(f"✅ Words Per Minute(WPM): {avg_wpm:.2f}")
     print(f"✅ 무음 구간 비율: {pause_ratio:.2f}")
