@@ -1,309 +1,419 @@
-// 내용 분석 페이지(더미데이터 Ver.)
+// 내용 분석 페이지 (백엔드 연동용 Ver.)
+// - 서버가 JSON(원문/교정문/강조HTML/피드백텍스트)까지 주면 UI 카드에 렌더
+// - 서버가 html_url만 주더라도 링크로 결과 HTML 열람 가능(폴백)
 
-import React, { useState, useRef } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
 import axios from 'axios';
+import './Analysis_Content.css';
 import {
-  CloudUpload, ChevronDown, ChevronUp,
-  Brain, Repeat, Layout, AlertTriangle, Trash,
-  ExternalLink, FileText, Hash, ListChecks
+  CloudUpload, AlertTriangle, ExternalLink,
+  FileText, Hash, ListChecks, ClipboardCopy, Wand2
 } from 'lucide-react';
 import {
   RadarChart, Radar, PolarGrid, PolarAngleAxis,
   PolarRadiusAxis, ResponsiveContainer
 } from 'recharts';
-import './Analysis_Content.css';
 
-// ✅ 더미 데이터: 백엔드 연결 전까지는 mock 데이터를 활용한 테스트용
-const mockResult = {
-  stats: { wordCount: 265, errorCount: 7, avgErrors: 0.6 },
-  errors: [
-    { original: '잇엇다', suggestion: '있었다', type: '맞춤법' },
-    { original: '되였다', suggestion: '되었다', type: '표기법' },
-    { original: '불필요하다 생각한다', suggestion: '불필요하다고 생각한다', type: '문법' },
-  ],
-  originalText: '이 발표는 매우 중요하다고 생각한다. 그러나 잇엇다 되였다 불필요하다 생각한다.',
-  correctedText: '이 발표는 매우 중요하다고 생각한다. 그러나 있었다 되었다 불필요하다고 생각한다.',
-  highlightedText:
-    '이 발표는 매우 중요하다고 생각한다. 그러나 <span style="color:red;">있었다</span> <span style="color:red;">되었다</span> <span style="color:red;">불필요하다고</span> 생각한다.',
-  feedback: {
-    '일관성': '전체적으로 주제에 대한 집중도가 높고 일관된 내용 흐름을 유지하고 있습니다.',
-    '논리성': '초반 주장과 후반 설명 사이에 근거 연결이 약간 부족합니다.',
-    '구성': '도입-전개-결론이 대체로 잘 나뉘어 있으나 결론 부분이 약합니다.',
-    '주제 일탈': '전체 주제를 벗어나는 문장은 발견되지 않았습니다.',
-    '불필요한 내용': '"되었다" 부분은 반복된 표현으로 제거해도 무방합니다.'
-  },
-  htmlLink: '/model/content/results/corrected_result.html'
-};
+// ===================== 환경 설정(CRA/Vite 공통) =====================
+const API_BASE =
+  (typeof process !== 'undefined' &&
+    process.env &&
+    process.env.REACT_APP_API_BASE_URL &&
+    process.env.REACT_APP_API_BASE_URL.replace(/\/+$/, '')) ||
+  'http://localhost:8000';
 
-export default function AnalysisContent() {
-  // 📌 상태 정의: 파일, 분석 결과, 진행률, 에러 등
+// 프론트 UI 색상
+const COLOR_PRIMARY = '#6EAED5';   // 교정문 복사 버튼
+const COLOR_SECONDARY = '#A68ED5'; // 분석 시작/링크 버튼
+
+// ===================== 보조 유틸 =====================
+// 서버가 "강조 HTML"을 안 주는 경우를 대비해서 간단한 하이라이트(옵션)
+function naiveHighlight(original = '', corrected = '') {
+  if (!original || !corrected) return corrected;
+  try {
+    // 아주 단순한 토큰 비교 (빠른 폴백용)
+    const o = original.split(/\s+/);
+    const c = corrected.split(/\s+/);
+    const map = new Map();
+    o.forEach((w) => map.set(w, (map.get(w) || 0) + 1));
+    return c
+      .map((w) => {
+        const left = map.get(w) || 0;
+        if (left > 0) {
+          map.set(w, left - 1);
+          return w;
+        }
+        return `<span style="color:red;font-weight:bold;">${w}</span>`;
+      })
+      .join(' ');
+  } catch {
+    return corrected;
+  }
+}
+
+// 강조된 단어(span style="color:red") 개수를 세어 오류/수정 개수 근사치로 사용
+function countHighlightedSpans(html = '') {
+  return (html.match(/<span[^>]*style=["'][^"']*color:\s*red/gi) || []).length;
+}
+
+// ===================== 컴포넌트 =====================
+export default function Analysis_Content() {
+  // 업로드 상태
   const [file, setFile] = useState(null);
   const [fileName, setFileName] = useState('');
+
+  // 요청/응답 상태
+  const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState(0);
-  const [stats, setStats] = useState(null);
-  const [errors, setErrors] = useState([]);
+  const [error, setError] = useState(null);
+
+  // 결과 데이터(서버 JSON을 기대, 없으면 일부는 폴백 계산)
   const [originalText, setOriginalText] = useState('');
   const [correctedText, setCorrectedText] = useState('');
-  const [highlightedText, setHighlightedText] = useState('');
-  const [feedback, setFeedback] = useState({});
-  const [chartData, setChartData] = useState([]);
-  const [htmlLink, setHtmlLink] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(null);
-  const [activeTab, setActiveTab] = useState('highlighted');
-  const [openFeedback, setOpenFeedback] = useState({});
+  const [highlightedHtml, setHighlightedHtml] = useState(''); // 서버가 준 강조 HTML(또는 폴백)
+  const [feedbackText, setFeedbackText] = useState('');       // perform_analysis 결과 텍스트(있으면)
+  const [htmlUrl, setHtmlUrl] = useState('');                 // corrected_result.html 접근 URL
+
+  // 탭 상태
+  const [tab, setTab] = useState('original'); // 'original' | 'corrected'
+
   const fileInputRef = useRef(null);
 
-  // 🔄 파일 분석 시작 전 상태 초기화
-  const resetStates = () => {
-    setStats(null);
-    setErrors([]);
+  // 간단한 통계: 단어 수, 수정 개수(강조 span 카운트), 평균 오류(근사)
+  const stats = useMemo(() => {
+    const wc = correctedText ? correctedText.trim().split(/\s+/).filter(Boolean).length : 0;
+    const errorCount = countHighlightedSpans(highlightedHtml);
+    const avgErrors = wc > 0 ? errorCount / Math.max(1, Math.round(wc / 20)) : 0; // 대략 문장 20단어 가정
+    return { wordCount: wc, errorCount, avgErrors: Number(avgErrors.toFixed(2)) };
+  }, [correctedText, highlightedHtml]);
+
+  // 레이더(임시): 서버 점수가 없으므로 시연용 계산치(원하면 제거 가능)
+  const radarData = useMemo(() => {
+    // 강조 개수를 기반으로 임시 점수(낮을수록 좋은데 0~10 스케일 반전)
+    const penalty = Math.min(10, countHighlightedSpans(highlightedHtml) / 5);
+    const base = 8.5 - penalty * 0.5;
+    const clamp = (n) => Math.max(0, Math.min(10, n));
+    return [
+      { subject: '논리성', A: clamp(base + 0.2), fullMark: 10 },
+      { subject: '구조화', A: clamp(base - 0.1), fullMark: 10 },
+      { subject: '간결성', A: clamp(base - 0.2), fullMark: 10 },
+      { subject: '전달력', A: clamp(base + 0.1), fullMark: 10 },
+      { subject: '일관성', A: clamp(base),       fullMark: 10 },
+    ];
+  }, [highlightedHtml]);
+
+  // 파일 선택
+  const onChangeFile = (e) => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    setFile(f);
+    setFileName(f.name);
+  };
+
+  // 초기화
+  const resetAll = () => {
+    setFile(null);
+    setFileName('');
+    setLoading(false);
+    setProgress(0);
+    setError(null);
     setOriginalText('');
     setCorrectedText('');
-    setHighlightedText('');
-    setFeedback({});
-    setChartData([]);
-    setHtmlLink('');
+    setHighlightedHtml('');
+    setFeedbackText('');
+    setHtmlUrl('');
+    setTab('original');
+  };
+
+  // === 업로드 & 실행: /content/run ===
+  const handleRun = async () => {
     setError(null);
-    setProgress(0);
-  };
 
-  // ✅ 분석 결과 파싱 및 상태 업데이트
-  const parseResult = (res) => {
-    setStats(res.stats);
-    setErrors(res.errors);
-    setOriginalText(res.originalText);
-    setCorrectedText(res.correctedText);
-    setHighlightedText(res.highlightedText);
-    setFeedback(res.feedback);
-    setHtmlLink(res.htmlLink);
-    setOpenFeedback(Object.fromEntries(Object.keys(res.feedback).map(k => [k, true])));
-    setChartData(Object.entries(res.feedback).map(([k]) => ({ category: k, score: 4 + Math.random() })));
-  };
+    if (!file) {
+      setError('분석할 텍스트 파일(.txt)을 선택해주세요.');
+      return;
+    }
 
-  // 📁 파일 선택 시 상태 저장 + 업로드 시뮬레이션
-  const handleFileSelect = (e) => {
-    const selectedFile = e.target.files[0];
-    if (!selectedFile) return;
-    setFile(selectedFile);
-    setFileName(selectedFile.name);
-    resetStates();
-    simulateUpload();
-  };
+    try {
+      setLoading(true);
+      setProgress(0);
 
-  // 🕐 분석 진행률 애니메이션 + 더미 데이터 파싱
-  const simulateUpload = () => {
-    setLoading(true);
-    let current = 0;
-    const interval = setInterval(() => {
-      current += 10;
-      setProgress(current);
-      if (current >= 100) clearInterval(interval);
-    }, 120);
+      const form = new FormData();
+      // 백엔드에서 저장 후 run_spellcheck_and_analysis(path) 호출
+      form.append('script', file); // ← 서버에서 이 이름으로 받게 해줘(아래 FastAPI 예시 제공)
 
-    setTimeout(() => {
-      parseResult(mockResult);
+      const { data } = await axios.post(`${API_BASE}/content/run`, form, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+        onUploadProgress: (pe) => {
+          if (!pe.total) return;
+          setProgress(Math.min(95, Math.round((pe.loaded * 100) / pe.total)));
+        },
+        timeout: 120_000,
+      });
+
+      // 서버가 리턴해줄 수 있는 필드들(권장 스펙)
+      // {
+      //   html_url: "/static/corrected_result.html",
+      //   original_text: "...",
+      //   corrected_text: "...",
+      //   highlighted_html: "<span ...>...</span>",
+      //   feedback_text: "..."     // perform_analysis의 결과
+      // }
+      setHtmlUrl(data?.html_url || '');
+      setOriginalText(data?.original_text || '');
+      setCorrectedText(data?.corrected_text || '');
+
+      // 강조 HTML이 있으면 그대로 사용, 없으면 폴백 계산
+      if (data?.highlighted_html) {
+        setHighlightedHtml(data.highlighted_html);
+      } else if (data?.original_text && data?.corrected_text) {
+        setHighlightedHtml(naiveHighlight(data.original_text, data.corrected_text));
+      } else {
+        setHighlightedHtml('');
+      }
+
+      setFeedbackText(data?.feedback_text || '');
+
+      setProgress(100);
+    } catch (err) {
+      console.error(err);
+      if (err?.response) {
+        setError(`서버 오류(${err.response.status}): ${err.response.data?.detail || '자세한 로그를 확인하세요.'}`);
+      } else if (err?.code === 'ECONNABORTED') {
+        setError('요청 시간이 초과되었습니다. 텍스트 크기를 줄이거나 다시 시도해주세요.');
+      } else {
+        setError('네트워크/CORS 문제일 수 있어요. FastAPI CORS를 확인해주세요.');
+      }
+    } finally {
       setLoading(false);
-    }, 1500);
+    }
   };
 
-  // 📋 교정된 텍스트 전체 복사
-  const handleApplyAll = () => {
-    navigator.clipboard.writeText(correctedText);
-    alert('교정된 텍스트가 클립보드에 복사되었습니다.');
+  // 교정문 복사
+  const copyCorrected = async () => {
+    try {
+      await navigator.clipboard.writeText(correctedText || '');
+      alert('교정된 텍스트를 복사했어요!');
+    } catch {
+      alert('복사에 실패했어요. 브라우저 권한을 확인해주세요.');
+    }
   };
 
-  // 🧠 아이콘 매핑: 피드백 유형별 시각적 요소 설정
-  const iconMap = {
-    '일관성': <Repeat className="w-5 h-5 text-blue-500" />,
-    '논리성': <Brain className="w-5 h-5 text-indigo-500" />,
-    '구성': <Layout className="w-5 h-5 text-green-500" />,
-    '주제 일탈': <AlertTriangle className="w-5 h-5 text-yellow-500" />,
-    '불필요한 내용': <Trash className="w-5 h-5 text-red-500" />,
-  };
-
-  // ✅ 실제 렌더링
   return (
-    <div className="container mx-auto p-8 space-y-20">
-      {/* 🔽 파일 업로드 박스 */}
-      <div className="max-w-xl mx-auto p-8 border border-gray-200 bg-[#f7f9fc] rounded-lg text-center">
-        <CloudUpload className="mx-auto mb-4 w-12 h-12 text-gray-400" />
-        <h3 className="text-lg font-medium mb-2">파일 업로드</h3>
-        <p className="text-sm text-gray-500 mb-4">.docx, .txt, .pdf 지원</p>
-        <input
-          type="file"
-          ref={fileInputRef}
-          accept=".docx,.txt,.pdf"
-          className="hidden"
-          onChange={handleFileSelect}
-        />
-        <button
-          onClick={() => fileInputRef.current?.click()}
-          className="px-6 py-3 bg-white rounded-full border border-gray-300 hover:bg-gray-100 transition"
-        >
-          대본 파일 선택
-        </button>
-        {fileName && <p className="text-sm text-gray-600 mt-2">📄 {fileName}</p>}
+    <div className="mx-auto w-full p-8 space-y-10 max-w-[1400px]">
+      {/* 업로드 박스 */}
+      <div className="max-w-2xl mx-auto p-8 border border-gray-200 bg-white rounded-lg">
+        <div className="flex items-center gap-3 mb-2">
+          <CloudUpload className="w-6 h-6 text-gray-500" />
+          <h3 className="text-lg font-semibold">대본 파일 업로드(.txt)</h3>
+        </div>
+
+        <div className="space-y-2">
+          <div className="flex items-center gap-4">
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".txt"
+              onChange={onChangeFile}
+              className="block w-full text-sm text-gray-700 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-gray-100 hover:file:bg-gray-200"
+            />
+          </div>
+          {fileName && <p className="text-xs text-gray-500">{fileName}</p>}
+        </div>
+
+        <div className="mt-6 flex items-center gap-3">
+          <button
+            onClick={handleRun}
+            disabled={loading}
+            className="px-4 py-2 rounded-md text-white"
+            style={{ backgroundColor: COLOR_SECONDARY, opacity: loading ? 0.7 : 1 }}
+            title="분석 시작"
+          >
+            {loading ? '분석 중…' : '분석 시작'}
+          </button>
+          <button
+            onClick={resetAll}
+            disabled={loading}
+            className="px-4 py-2 rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50"
+            title="초기화"
+          >
+            초기화
+          </button>
+        </div>
+
+        {loading && (
+          <div className="mt-4">
+            <div className="w-full bg-gray-100 rounded-full h-2">
+              <div
+                className="h-2 rounded-full"
+                style={{ width: `${progress}%`, backgroundColor: COLOR_SECONDARY, transition: 'width 0.2s ease' }}
+              />
+            </div>
+            <p className="mt-2 text-xs text-gray-500">업로드 및 분석 진행 중… {progress}%</p>
+          </div>
+        )}
+
+        {error && (
+          <div className="mt-4 p-3 rounded-md bg-red-50 border border-red-200 text-sm text-red-700">
+            <AlertTriangle className="inline-block w-4 h-4 mr-1" />
+            {error}
+          </div>
+        )}
       </div>
 
-      {/* 🟡 분석 진행 바 */}
-      {file && progress < 100 && (
-        <div className="max-w-xl mx-auto text-center">
-          <progress value={progress} max="100" className="custom-progress w-full h-2 mb-2" />
-          <p className="text-sm text-gray-600">분석 중…</p>
-        </div>
-      )}
-
-      {/* 🔴 오류 메시지 */}
-      {error && <div className="text-center text-red-500">{error}</div>}
-
-      {/* ✅ 맞춤법 분석 결과 표시 */}
-      {progress === 100 && stats && (
-        <section className="space-y-10">
-          <h2 className="text-2xl font-bold text-[#3A5E88] border-b pb-2">📝 맞춤법 교정 피드백</h2>
-
-          {/* 요약 카드 */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-6">
-            <SummaryCard icon={<FileText />} value={stats.wordCount} label="총 단어 수" />
-            <SummaryCard icon={<Hash />} value={stats.errorCount} label="오류 건수" />
-            <SummaryCard icon={<ListChecks />} value={`${stats.avgErrors} /문장`} label="평균 오류" />
-          </div>
-
-          {/* 텍스트 탭 (강조/원본/교정본) */}
-          <div className="mt-6">
-            <div className="flex flex-wrap gap-2 sm:space-x-4 mb-2">
-              <TabButton label="교정 강조" tab="highlighted" activeTab={activeTab} setActiveTab={setActiveTab} />
-              <TabButton label="원본 텍스트" tab="original" activeTab={activeTab} setActiveTab={setActiveTab} />
-              <TabButton label="교정된 텍스트" tab="corrected" activeTab={activeTab} setActiveTab={setActiveTab} />
+      {/* 결과 */}
+      {(originalText || correctedText || htmlUrl) && (
+        <div className="space-y-10">
+          {/* 요약 통계 */}
+          <section className="grid md:grid-cols-3 gap-4">
+            <div className="p-5 rounded-lg border bg-white">
+              <div className="flex items-center gap-2">
+                <FileText className="w-5 h-5 text-gray-500" />
+                <h4 className="font-semibold">단어 수(교정문)</h4>
+              </div>
+              <p className="mt-2 text-2xl font-bold">{stats.wordCount}</p>
             </div>
-            <div className="p-4 bg-white border rounded-lg text-gray-800 whitespace-pre-wrap leading-relaxed">
-              {activeTab === 'highlighted' && <div dangerouslySetInnerHTML={{ __html: highlightedText }} />}
-              {activeTab === 'original' && originalText}
-              {activeTab === 'corrected' && correctedText}
+            <div className="p-5 rounded-lg border bg-white">
+              <div className="flex items-center gap-2">
+                <Hash className="w-5 h-5 text-gray-500" />
+                <h4 className="font-semibold">수정된 토큰 수(근사)</h4>
+              </div>
+              <p className="mt-2 text-2xl font-bold">{stats.errorCount}</p>
             </div>
-          </div>
-
-          {/* 오류 리스트 테이블 */}
-          {errors.length > 0 && (
-            <div className="p-4 bg-white border border-gray-100 rounded-lg overflow-auto min-w-[600px]">
-              <table className="w-full text-left">
-                <thead>
-                  <tr>
-                    <th className="py-2">오류 문장</th>
-                    <th className="py-2">수정안</th>
-                    <th className="py-2">유형</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {errors.map((err, idx) => (
-                    <tr key={idx} className="hover:bg-gray-50">
-                      <td className="py-2 pr-4">{err.original}</td>
-                      <td className="py-2 pr-4">{err.suggestion}</td>
-                      <td className="py-2">{err.type}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+            <div className="p-5 rounded-lg border bg-white">
+              <div className="flex items-center gap-2">
+                <ListChecks className="w-5 h-5 text-gray-500" />
+                <h4 className="font-semibold">문장당 평균 오류(근사)</h4>
+              </div>
+              <p className="mt-2 text-2xl font-bold">{stats.avgErrors}</p>
             </div>
-          )}
-        </section>
-      )}
+          </section>
 
-      {/* ✅ 내용 분석 결과 (레이더차트 + 세부 피드백) */}
-      {progress === 100 && chartData.length > 0 && (
-        <section className="space-y-10">
-          <h2 className="text-2xl font-bold text-[#3A5E88] border-b pb-2">🧠 내용 분석 피드백</h2>
-
-          {/* 레이더 차트 */}
-          <div className="p-6 bg-white border rounded-lg">
-            <h3 className="text-lg font-semibold mb-4 text-center">내용 분석 점수</h3>
-            <ResponsiveContainer width="100%" height={300}>
-              <RadarChart data={chartData} outerRadius={100}>
-                <PolarGrid />
-                <PolarAngleAxis dataKey="category" />
-                <PolarRadiusAxis angle={30} domain={[0, 5]} />
-                <Radar name="점수" dataKey="score" stroke="#6EAED5" fill="#6EAED5" fillOpacity={0.6} />
-              </RadarChart>
-            </ResponsiveContainer>
-          </div>
-
-          {/* 세부 피드백 카드 */}
-          <div className="grid sm:grid-cols-2 gap-4 pt-2">
-            {Object.entries(feedback).map(([key, value], idx) => (
-              <div key={idx} className="border border-gray-200 rounded-lg shadow-sm transition-all duration-300">
+          {/* 탭: 원문/교정문 */}
+          {(originalText || correctedText) && (
+            <section className="rounded-lg border bg-white">
+              <div className="flex border-b">
                 <button
-                  onClick={() => setOpenFeedback(prev => ({ ...prev, [key]: !prev[key] }))}
-                  className="flex items-center justify-between w-full px-5 py-4 text-left bg-white rounded-t-lg hover:bg-gray-50"
+                  className={`px-4 py-2 text-sm ${tab === 'original' ? 'border-b-2 border-black font-semibold' : 'text-gray-500'}`}
+                  onClick={() => setTab('original')}
                 >
-                  <div className="flex items-center gap-2 text-lg font-semibold text-gray-800">
-                    {iconMap[key] || '📝'} <span>{key}</span>
-                  </div>
-                  <div className={`transition-transform duration-200 ${openFeedback[key] ? 'rotate-180' : ''}`}>
-                    {openFeedback[key] ? <ChevronUp size={20} /> : <ChevronDown size={20} />}
-                  </div>
+                  원문
                 </button>
-                {openFeedback[key] && (
-                  <div className="px-6 pb-5 pt-1 text-gray-700 text-[15px] leading-relaxed border-t bg-white rounded-b-lg">
-                    {value}
-                  </div>
+                <button
+                  className={`px-4 py-2 text-sm ${tab === 'corrected' ? 'border-b-2 border-black font-semibold' : 'text-gray-500'}`}
+                  onClick={() => setTab('corrected')}
+                >
+                  교정문
+                </button>
+
+                {/* 교정문 복사 */}
+                <div className="ml-auto p-2">
+                  <button
+                    onClick={copyCorrected}
+                    className="inline-flex items-center gap-2 px-3 py-2 rounded-md text-white"
+                    style={{ backgroundColor: COLOR_PRIMARY }}
+                    title="교정된 텍스트 복사하기"
+                  >
+                    <ClipboardCopy className="w-4 h-4" />
+                    교정된 텍스트 복사하기
+                  </button>
+                </div>
+              </div>
+
+              <div className="p-5">
+                {tab === 'original' ? (
+                  <pre className="whitespace-pre-wrap break-words text-sm leading-6">{originalText}</pre>
+                ) : (
+                  <pre className="whitespace-pre-wrap break-words text-sm leading-6">{correctedText}</pre>
                 )}
               </div>
-            ))}
-          </div>
+            </section>
+          )}
 
-          {/* 하단 버튼들 */}
-          <div className="flex flex-col sm:flex-row justify-end gap-2 sm:gap-3 mt-6">
-            {htmlLink && (
+          {/* 강조/하이라이트 미리보기(서버 제공 또는 폴백 계산) */}
+          {highlightedHtml && (
+            <section className="rounded-lg border bg-white">
+              <div className="flex items-center justify-between p-4">
+                <div className="flex items-center gap-2">
+                  <Wand2 className="w-5 h-5 text-gray-500" />
+                  <h4 className="font-semibold">교정 강조 표시</h4>
+                </div>
+              </div>
+              <div className="px-4 pb-6 text-sm leading-6">
+                <div dangerouslySetInnerHTML={{ __html: highlightedHtml }} />
+              </div>
+            </section>
+          )}
+
+          {/* 레이더(임시 시각화) */}
+          <section className="rounded-lg border bg-white">
+            <div className="flex items-center justify-between p-4">
+              <div className="flex items-center gap-2">
+                <h4 className="font-semibold">발표 패턴 분석(임시 지표)</h4>
+              </div>
+            </div>
+            <div className="px-4 pb-6">
+              <div className="w-full h-72">
+                <ResponsiveContainer>
+                  <RadarChart data={radarData}>
+                    <PolarGrid />
+                    <PolarAngleAxis dataKey="subject" />
+                    <PolarRadiusAxis angle={30} domain={[0, 10]} />
+                    <Radar
+                      name="점수"
+                      dataKey="A"
+                      stroke={COLOR_SECONDARY}
+                      fill={COLOR_SECONDARY}
+                      fillOpacity={0.45}
+                    />
+                  </RadarChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+          </section>
+
+          {/* 내용 피드백 텍스트(perform_analysis 결과가 있을 때) */}
+          {feedbackText && (
+            <section className="rounded-lg border bg-white">
+              <div className="flex items-center justify-between p-4">
+                <div className="flex items-center gap-2">
+                  <Wand2 className="w-5 h-5 text-gray-500" />
+                  <h4 className="font-semibold">AI 내용 피드백</h4>
+                </div>
+              </div>
+              <div className="px-4 pb-6">
+                <div className="p-4 rounded-md border bg-white text-sm whitespace-pre-wrap leading-6">
+                  {feedbackText}
+                </div>
+              </div>
+            </section>
+          )}
+
+          {/* 하단 액션 */}
+          <div className="flex flex-wrap items-center gap-3">
+            {htmlUrl && (
               <a
-                href={htmlLink}
+                href={htmlUrl}
                 target="_blank"
-                rel="noopener noreferrer"
-                className="flex items-center justify-center space-x-2 px-6 py-3 bg-[#A68ED5] text-white font-semibold rounded-lg hover:bg-[#9373c4] transition"
+                rel="noreferrer"
+                className="inline-flex items-center gap-2 px-3 py-2 rounded-md text-white"
+                style={{ backgroundColor: COLOR_SECONDARY }}
+                title="HTML 전체 보기"
               >
-                <ExternalLink className="w-4 h-4 text-white" />
-                <span>맞춤법 교정 결과 보기</span>
+                <ExternalLink className="w-4 h-4" />
+                결과 HTML 열기
               </a>
             )}
             <button
-              onClick={handleApplyAll}
-              className="px-6 py-3 bg-[#6EAED5] text-white font-semibold rounded-lg hover:bg-[#5C9EC0] transition"
-            >
-              교정된 텍스트 복사하기
-            </button>
-            <button
-              onClick={() => window.location.reload()}
-              className="px-6 py-3 border border-gray-300 font-normal rounded-lg hover:bg-gray-100 transition"
+              onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
+              className="px-3 py-2 rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50"
+              title="다시 분석하기"
             >
               다시 분석하기
             </button>
           </div>
-        </section>
+        </div>
       )}
     </div>
-  );
-}
-
-// ✅ 단어 수 / 오류 수 요약 카드
-function SummaryCard({ icon, value, label }) {
-  return (
-    <div className="p-6 border rounded-lg bg-white text-center">
-      <div className="mx-auto mb-2 w-8 h-8 text-[#5686C4]">{icon}</div>
-      <p className="text-2xl font-bold">{value}</p>
-      <p className="text-gray-500">{label}</p>
-    </div>
-  );
-}
-
-// ✅ 탭 전환 버튼
-function TabButton({ label, tab, activeTab, setActiveTab }) {
-  return (
-    <button
-      onClick={() => setActiveTab(tab)}
-      className={`px-4 py-2 rounded font-medium transition ${
-        activeTab === tab ? 'bg-[#6EAED5] text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-      }`}
-    >
-      {label}
-    </button>
   );
 }

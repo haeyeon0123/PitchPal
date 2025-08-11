@@ -1,19 +1,16 @@
-// 내용 분석 페이지(더미데이터 Ver.)
+// ✅ 내용 분석 페이지 (더미데이터 Ver.)
+// 아직 최신 버전 아님
 
 import React, { useState, useRef } from 'react';
-import axios from 'axios';
+import axios from 'axios'; // ⚠️ 현재 axios는 사용되지 않지만 실제 백엔드 연동 시 필요
 import {
   CloudUpload, ChevronDown, ChevronUp,
   Brain, Repeat, Layout, AlertTriangle, Trash,
   ExternalLink, FileText, Hash, ListChecks
-} from 'lucide-react';
-import {
-  RadarChart, Radar, PolarGrid, PolarAngleAxis,
-  PolarRadiusAxis, ResponsiveContainer
-} from 'recharts';
-import './Analysis_Content.css';
+} from 'lucide-react'; // 아이콘
+import './Analysis_Content.css'; // 커스텀 스타일
 
-// ✅ 더미 데이터: 백엔드 연결 전까지는 mock 데이터를 활용한 테스트용
+// ✅ 더미 데이터: 실제 결과 대신 UI 확인용 mock 데이터
 const mockResult = {
   stats: { wordCount: 265, errorCount: 7, avgErrors: 0.6 },
   errors: [
@@ -36,25 +33,26 @@ const mockResult = {
 };
 
 export default function AnalysisContent() {
-  // 📌 상태 정의: 파일, 분석 결과, 진행률, 에러 등
+  // ⬇️ 업로드 및 분석 상태 관리용 state들
   const [file, setFile] = useState(null);
   const [fileName, setFileName] = useState('');
   const [progress, setProgress] = useState(0);
-  const [stats, setStats] = useState(null);
-  const [errors, setErrors] = useState([]);
+  const [stats, setStats] = useState(null); // 단어 수, 오류 수 등
+  const [errors, setErrors] = useState([]); // 교정된 오류 목록
   const [originalText, setOriginalText] = useState('');
   const [correctedText, setCorrectedText] = useState('');
   const [highlightedText, setHighlightedText] = useState('');
-  const [feedback, setFeedback] = useState({});
-  const [chartData, setChartData] = useState([]);
-  const [htmlLink, setHtmlLink] = useState('');
+  const [feedback, setFeedback] = useState({}); // 내용 분석 피드백
+  const [htmlLink, setHtmlLink] = useState(''); // 외부 링크
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+
+  // ⬇️ 탭 및 피드백 아코디언 상태 관리
   const [activeTab, setActiveTab] = useState('highlighted');
   const [openFeedback, setOpenFeedback] = useState({});
-  const fileInputRef = useRef(null);
+  const fileInputRef = useRef(null); // 숨겨진 파일 input 조작용
 
-  // 🔄 파일 분석 시작 전 상태 초기화
+  // ✅ 상태 초기화 함수 (새 파일 업로드 시 호출됨)
   const resetStates = () => {
     setStats(null);
     setErrors([]);
@@ -62,13 +60,12 @@ export default function AnalysisContent() {
     setCorrectedText('');
     setHighlightedText('');
     setFeedback({});
-    setChartData([]);
     setHtmlLink('');
     setError(null);
     setProgress(0);
   };
 
-  // ✅ 분석 결과 파싱 및 상태 업데이트
+  // ✅ mock 결과를 state에 적용하는 함수
   const parseResult = (res) => {
     setStats(res.stats);
     setErrors(res.errors);
@@ -77,21 +74,21 @@ export default function AnalysisContent() {
     setHighlightedText(res.highlightedText);
     setFeedback(res.feedback);
     setHtmlLink(res.htmlLink);
+    // 아코디언 모두 open 상태로 초기화
     setOpenFeedback(Object.fromEntries(Object.keys(res.feedback).map(k => [k, true])));
-    setChartData(Object.entries(res.feedback).map(([k]) => ({ category: k, score: 4 + Math.random() })));
   };
 
-  // 📁 파일 선택 시 상태 저장 + 업로드 시뮬레이션
+  // ✅ 파일 선택 시 동작하는 함수
   const handleFileSelect = (e) => {
     const selectedFile = e.target.files[0];
     if (!selectedFile) return;
     setFile(selectedFile);
     setFileName(selectedFile.name);
     resetStates();
-    simulateUpload();
+    simulateUpload(); // 더미 업로드 시뮬레이션
   };
 
-  // 🕐 분석 진행률 애니메이션 + 더미 데이터 파싱
+  // ✅ 분석 시뮬레이션 (실제 백엔드 연동 전용)
   const simulateUpload = () => {
     setLoading(true);
     let current = 0;
@@ -102,18 +99,18 @@ export default function AnalysisContent() {
     }, 120);
 
     setTimeout(() => {
-      parseResult(mockResult);
+      parseResult(mockResult); // 실제로는 axios 요청 결과를 넣어야 함
       setLoading(false);
     }, 1500);
   };
 
-  // 📋 교정된 텍스트 전체 복사
+  // ✅ 교정된 텍스트 클립보드 복사
   const handleApplyAll = () => {
     navigator.clipboard.writeText(correctedText);
     alert('교정된 텍스트가 클립보드에 복사되었습니다.');
   };
 
-  // 🧠 아이콘 매핑: 피드백 유형별 시각적 요소 설정
+  // ✅ 피드백 유형별 아이콘 매핑
   const iconMap = {
     '일관성': <Repeat className="w-5 h-5 text-blue-500" />,
     '논리성': <Brain className="w-5 h-5 text-indigo-500" />,
@@ -122,10 +119,11 @@ export default function AnalysisContent() {
     '불필요한 내용': <Trash className="w-5 h-5 text-red-500" />,
   };
 
-  // ✅ 실제 렌더링
+  // ✅ 실제 렌더링 영역 시작
   return (
     <div className="container mx-auto p-8 space-y-20">
-      {/* 🔽 파일 업로드 박스 */}
+
+      {/* 🔹 파일 업로드 박스 */}
       <div className="max-w-xl mx-auto p-8 border border-gray-200 bg-[#f7f9fc] rounded-lg text-center">
         <CloudUpload className="mx-auto mb-4 w-12 h-12 text-gray-400" />
         <h3 className="text-lg font-medium mb-2">파일 업로드</h3>
@@ -146,7 +144,7 @@ export default function AnalysisContent() {
         {fileName && <p className="text-sm text-gray-600 mt-2">📄 {fileName}</p>}
       </div>
 
-      {/* 🟡 분석 진행 바 */}
+      {/* 🔹 업로드 후 분석 진행 중 표시 */}
       {file && progress < 100 && (
         <div className="max-w-xl mx-auto text-center">
           <progress value={progress} max="100" className="custom-progress w-full h-2 mb-2" />
@@ -154,22 +152,22 @@ export default function AnalysisContent() {
         </div>
       )}
 
-      {/* 🔴 오류 메시지 */}
+      {/* 🔹 에러 메시지 */}
       {error && <div className="text-center text-red-500">{error}</div>}
 
-      {/* ✅ 맞춤법 분석 결과 표시 */}
+      {/* 🔹 맞춤법 교정 결과 요약 및 표 */}
       {progress === 100 && stats && (
         <section className="space-y-10">
           <h2 className="text-2xl font-bold text-[#3A5E88] border-b pb-2">📝 맞춤법 교정 피드백</h2>
 
-          {/* 요약 카드 */}
+          {/* 요약 카드 3개 */}
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-6">
             <SummaryCard icon={<FileText />} value={stats.wordCount} label="총 단어 수" />
             <SummaryCard icon={<Hash />} value={stats.errorCount} label="오류 건수" />
             <SummaryCard icon={<ListChecks />} value={`${stats.avgErrors} /문장`} label="평균 오류" />
           </div>
 
-          {/* 텍스트 탭 (강조/원본/교정본) */}
+          {/* 텍스트 보기 탭 */}
           <div className="mt-6">
             <div className="flex flex-wrap gap-2 sm:space-x-4 mb-2">
               <TabButton label="교정 강조" tab="highlighted" activeTab={activeTab} setActiveTab={setActiveTab} />
@@ -183,7 +181,7 @@ export default function AnalysisContent() {
             </div>
           </div>
 
-          {/* 오류 리스트 테이블 */}
+          {/* 오류 상세 표 */}
           {errors.length > 0 && (
             <div className="p-4 bg-white border border-gray-100 rounded-lg overflow-auto min-w-[600px]">
               <table className="w-full text-left">
@@ -209,25 +207,11 @@ export default function AnalysisContent() {
         </section>
       )}
 
-      {/* ✅ 내용 분석 결과 (레이더차트 + 세부 피드백) */}
-      {progress === 100 && chartData.length > 0 && (
+      {/* 🔹 내용 분석 피드백 아코디언 카드 */}
+      {progress === 100 && Object.keys(feedback).length > 0 && (
         <section className="space-y-10">
           <h2 className="text-2xl font-bold text-[#3A5E88] border-b pb-2">🧠 내용 분석 피드백</h2>
 
-          {/* 레이더 차트 */}
-          <div className="p-6 bg-white border rounded-lg">
-            <h3 className="text-lg font-semibold mb-4 text-center">내용 분석 점수</h3>
-            <ResponsiveContainer width="100%" height={300}>
-              <RadarChart data={chartData} outerRadius={100}>
-                <PolarGrid />
-                <PolarAngleAxis dataKey="category" />
-                <PolarRadiusAxis angle={30} domain={[0, 5]} />
-                <Radar name="점수" dataKey="score" stroke="#6EAED5" fill="#6EAED5" fillOpacity={0.6} />
-              </RadarChart>
-            </ResponsiveContainer>
-          </div>
-
-          {/* 세부 피드백 카드 */}
           <div className="grid sm:grid-cols-2 gap-4 pt-2">
             {Object.entries(feedback).map(([key, value], idx) => (
               <div key={idx} className="border border-gray-200 rounded-lg shadow-sm transition-all duration-300">
@@ -283,7 +267,7 @@ export default function AnalysisContent() {
   );
 }
 
-// ✅ 단어 수 / 오류 수 요약 카드
+// ✅ 요약 카드 (단어 수 / 오류 수 등)
 function SummaryCard({ icon, value, label }) {
   return (
     <div className="p-6 border rounded-lg bg-white text-center">
@@ -294,7 +278,7 @@ function SummaryCard({ icon, value, label }) {
   );
 }
 
-// ✅ 탭 전환 버튼
+// ✅ 탭 버튼 (텍스트 보기 용)
 function TabButton({ label, tab, activeTab, setActiveTab }) {
   return (
     <button
