@@ -1,4 +1,6 @@
 import os
+import re
+import json
 import difflib
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -28,7 +30,7 @@ def highlight_differences(original, corrected):
     """원본과 교정된 텍스트를 비교하여 변경된 부분을 <span style="color:red">로 강조"""
     original_words = original.split()
     corrected_words = corrected.split()
-    
+
     matcher = difflib.SequenceMatcher(None, original_words, corrected_words)
     highlighted = []
 
@@ -98,14 +100,71 @@ def save_html(output_path, original, corrected, highlighted_text):
 
     print(f"맞춤법 교정 결과 HTML 저장 완료: {output_path}")
 
+# ===== JSON 저장 유틸 =====
+def _to_serializable(obj):
+    """넘파이/세트/날짜 등 직렬화 안전 변환"""
+    try:
+        import numpy as np
+        if isinstance(obj, (np.integer, np.floating)):
+            return obj.item()
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+    except Exception:
+        pass
+    if isinstance(obj, set):
+        return list(obj)
+    # datetime은 content_analysis 쪽에서 반환할 수도 있어 대비
+    import datetime
+    if isinstance(obj, (datetime.datetime, datetime.date)):
+        return obj.isoformat()
+    return obj
+
+def save_json(output_path, payload):
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2, default=_to_serializable)
+    print(f"맞춤법 교정 + 내용 피드백 JSON 저장 완료: {output_path}")
+
+def _count_spans(highlighted_html: str) -> int:
+    """하이라이트된 단어(<span ...>) 개수를 간단한 수정 건수로 집계"""
+    return len(re.findall(r"<span\b", highlighted_html))
+
 def run_spellcheck_and_analysis(input_path):
-    """main.py에서 호출: 텍스트 교정 후 content_analysis로 전달"""
+    """main.py에서 호출: 텍스트 교정 후 content_analysis로 전달 + JSON/HTML 저장"""
     original_text = read_text_file(input_path)
 
+    # 1) 교정
     corrected_text = gpt_spell_check(original_text)
     highlighted = highlight_differences(original_text, corrected_text)
 
-    output_path = "model/content/results/corrected_result.html"
-    save_html(output_path, original_text, corrected_text, highlighted)
+    # 2) 내용 분석 (core.content_analysis 사용)
+    # perform_analysis()가 dict를 반환한다고 가정.
+    # 만약 HTML을 반환한다면 content_analysis에 "dict 반환" 옵션을 추가하는 걸 추천.
+    analysis_result = content_analysis.perform_analysis(corrected_text)
 
-    content_analysis.perform_analysis(corrected_text)
+    # 3) 저장 경로
+    base_dir = "model/content/results"
+    html_path = os.path.join(base_dir, "corrected_result.html")
+    json_path = os.path.join(base_dir, "corrected_result.json")
+
+    # 4) HTML 저장(기존 그대로)
+    save_html(html_path, original_text, corrected_text, highlighted)
+
+    # 5) JSON 저장(동일 정보 + 분석 결과)
+    payload = {
+        "meta": {
+            "source_text_path": input_path,
+            "language": "ko"
+        },
+        "spell_check": {
+            "original_text": original_text,
+            "corrected_text": corrected_text,
+            "highlighted_html": highlighted,
+            "num_highlighted_tokens": _count_spans(highlighted)
+        },
+        "content_feedback": analysis_result  # dict 형태 권장
+    }
+    save_json(json_path, payload)
+
+    # 필요 시 반환
+    return {"html_path": html_path, "json_path": json_path}
