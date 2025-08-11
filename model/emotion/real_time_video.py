@@ -11,7 +11,7 @@ emotion_model_path   = 'model/emotion/models/_mini_XCEPTION.102-0.66.hdf5'
 video_path           = 'data/angry_video.mp4'  # 샘플 영상 경로
 
 # 결과 저장 경로
-RESULT_DIR        = 'model/emotion'
+RESULT_DIR        = 'model/emotion/results'
 RESULT_JSON_PATH  = os.path.join(RESULT_DIR, 'emotion_summary.json')
 
 # 타임라인 저장 여부(프론트 차트용, 1초 간격 샘플링)
