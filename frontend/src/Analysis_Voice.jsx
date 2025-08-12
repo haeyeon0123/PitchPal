@@ -1,4 +1,4 @@
-// 음성 분석 페이지 (백엔드 연동 Ver.)
+// 음성 분석 페이지 (백엔드 연동 Ver. / 업로드 박스 = 내용분석과 동일한 형태)
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import axios from 'axios';
 import {
@@ -168,8 +168,10 @@ export default function AnalysisVoice() {
 
   /** 실제 FastAPI 호출: POST /analyze-voice (multipart) */
   const handleAnalyze = useCallback(async () => {
-    // 오디오 + 대본 둘 다 있어야 시작
-    if (!fileInfo.audio || !fileInfo.script) return;
+    if (!fileInfo.audio || !fileInfo.script) {
+      setError('음성 파일과 대본(.txt) 파일을 모두 선택해주세요.');
+      return;
+    }
     setError(null);
     setLoading(true);
     setResult(null);
@@ -178,16 +180,17 @@ export default function AnalysisVoice() {
     try {
       const form = new FormData();
       form.append("audio", fileInfo.audio);
-      if (fileInfo.script) form.append("script", fileInfo.script);
+      form.append("script", fileInfo.script);
 
       const res = await axios.post(`${API_BASE}/analyze-voice`, form, {
         headers: { "Content-Type": "multipart/form-data" },
         onUploadProgress: (pe) => {
           if (!pe.total) return;
           const ratio = pe.loaded / pe.total;
-          const prog = Math.max(5, Math.min(85, Math.round(5 + ratio * 80)));
+          const prog = Math.max(5, Math.min(95, Math.round(5 + ratio * 90)));
           setProgress(prog);
         },
+        timeout: 180_000,
       });
 
       const ui = mapApiToUi(res.data || {});
@@ -209,13 +212,23 @@ export default function AnalysisVoice() {
     }
   }, [fileInfo.audio, fileInfo.script]);
 
-  // ✅ 오디오와 대본이 모두 선택되면 자동 분석 시작
-  useEffect(() => {
-    if (fileInfo.audio && fileInfo.script) handleAnalyze();
-  }, [fileInfo.audio, fileInfo.script, handleAnalyze]);
+  // 🔁 자동 분석 제거(내용분석과 동일: 수동 시작)
+  // useEffect(() => {
+  //   if (fileInfo.audio && fileInfo.script) handleAnalyze();
+  // }, [fileInfo.audio, fileInfo.script, handleAnalyze]);
 
   const handleReplay = () => { if (audioRef.current) { audioRef.current.currentTime = 0; audioRef.current.play(); } };
-  const handleReload = () => window.location.reload();
+
+  const handleReset = () => {
+    setFileInfo({ audio: null, script: null, audioUrl: null });
+    if (audioInputRef.current) audioInputRef.current.value = '';
+    if (scriptInputRef.current) scriptInputRef.current.value = '';
+    setLoading(false);
+    setProgress(0);
+    setError(null);
+    setResult(null);
+    setRadarData([]);
+  };
 
   // 레이더 차트 데이터(0~10 점수)
   useEffect(() => {
@@ -232,29 +245,30 @@ export default function AnalysisVoice() {
 
   return (
     <div className="container mx-auto p-8 space-y-10 max-w-7xl">
-      {/* 업로드 박스 */}
+      {/* ================= 업로드 박스: 내용분석과 동일 톤/레이아웃 ================= */}
       <div className="max-w-xl mx-auto p-8 border border-gray-200 bg-[#f7f9fc] rounded-lg text-center">
         <Mic className="mx-auto mb-4 w-12 h-12 text-gray-400" />
         <h3 className="text-lg font-medium mb-2">음성 파일 업로드</h3>
         <p className="text-sm text-gray-500 mb-4">.mp3, .wav, .txt 파일 업로드 가능</p>
 
+        {/* 숨김 input */}
         <input
           type="file" accept="audio/*" ref={audioInputRef} className="hidden"
           onChange={e => {
-            const file = e.target.files[0];
+            const file = e.target.files?.[0];
             if (file) setFileInfo(prev => ({ ...prev, audio: file, audioUrl: URL.createObjectURL(file) }));
           }}
         />
         <input
           type="file" accept=".txt" ref={scriptInputRef} className="hidden"
           onChange={e => {
-            const file = e.target.files[0];
+            const file = e.target.files?.[0];
             if (file) setFileInfo(prev => ({ ...prev, script: file }));
           }}
         />
 
+        {/* 선택 버튼 2개 (라운드형 흰색 버튼) */}
         <div className="flex justify-center gap-4">
-          {/* 기존 두 버튼 유지 */}
           <button
             onClick={() => audioInputRef.current?.click()}
             className="px-6 py-3 bg-white rounded-full border border-gray-300 hover:bg-gray-100 transition"
@@ -269,23 +283,54 @@ export default function AnalysisVoice() {
           </button>
         </div>
 
+        {/* 파일명 표시 */}
         {(fileInfo.audio || fileInfo.script) && (
           <p className="text-sm text-gray-600 mt-4">
-            {fileInfo.audio && <>🎧 {fileInfo.audio.name}</>} {fileInfo.audio && fileInfo.script && ' + '} {fileInfo.script && <>📝 {fileInfo.script.name}</>}
+            {fileInfo.audio && <>🎧 {fileInfo.audio.name}</>}
+            {fileInfo.audio && fileInfo.script && ' + '}
+            {fileInfo.script && <>📝 {fileInfo.script.name}</>}
           </p>
         )}
-      </div>
 
-      {/* 진행 표시 */}
-      {loading && (
-        <div className="max-w-2xl mx-auto text-center">
-          <progress value={progress} max="100" className="custom-progress w-full h-2 mb-2" />
-          <p className="text-sm text-gray-600">분석 중...</p>
+        {/* 실행/초기화 버튼 + 진행도/에러 (업로드 박스 내부 배치) */}
+        <div className="mt-6 flex items-center justify-center gap-3">
+          <button
+            onClick={handleAnalyze}
+            disabled={loading || !fileInfo.audio || !fileInfo.script}
+            className="px-4 py-2 rounded-md text-white"
+            style={{ backgroundColor: COLOR_PRIMARY, opacity: (loading || !fileInfo.audio || !fileInfo.script) ? 0.6 : 1 }}
+            title="분석 시작"
+          >
+            {loading ? '분석 중…' : '분석 시작'}
+          </button>
+          <button
+            onClick={handleReset}
+            disabled={loading}
+            className="px-4 py-2 rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50"
+            title="초기화"
+          >
+            초기화
+          </button>
         </div>
-      )}
 
-      {/* 에러 */}
-      {error && <div className="text-center text-red-500">{error}</div>}
+        {loading && (
+          <div className="mt-4">
+            <div className="w-full bg-gray-100 rounded-full h-2">
+              <div
+                className="h-2 rounded-full"
+                style={{ width: `${progress}%`, backgroundColor: COLOR_SECONDARY, transition: 'width 0.2s ease' }}
+              />
+            </div>
+            <p className="mt-2 text-xs text-gray-500">업로드 및 분석 진행 중… {progress}%</p>
+          </div>
+        )}
+
+        {error && (
+          <div className="mt-4 p-3 rounded-md bg-red-50 border border-red-200 text-sm text-red-700">
+            {error}
+          </div>
+        )}
+      </div>
 
       {/* 결과 */}
       {result && (
@@ -294,7 +339,7 @@ export default function AnalysisVoice() {
           audioUrl={fileInfo.audioUrl}
           audioRef={audioRef}
           onReplay={handleReplay}
-          onReload={handleReload}
+          onReload={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
           radarData={radarData}
         />
       )}
@@ -389,7 +434,7 @@ function ResultSection({ result, audioUrl, audioRef, onReplay, onReload, radarDa
       </section>
 
       {/* 하단 버튼 */}
-      <div className="flex flex-col sm:flex-row justify-center sm:justify-end items-center space-y-3 sm:space-y-0 sm:space-x-4 mt-2">
+      <div className="mt-10 mb-8 flex flex-wrap items-center justify-center gap-3">
         <button
           onClick={onReplay}
           className="w-full sm:w-auto px-6 py-3 text-white font-semibold rounded-lg transition"
@@ -889,7 +934,7 @@ function MFCCOverall({ segments, audioRef, height = 220 }) {
         <div className="bg-white border rounded-md p-2 text-sm">
           <div><b>{`t=${Number(label).toFixed(2)}s`}</b></div>
           <div>🎯 <b>음색(평균)</b> {m?.toFixed?.(2)} — 13개 MFCC의 단순 평균</div>
-          <div className="text-[11px] text-gray-500">그래프 구간을 클릭하면 해당 5초 구간이 재생됩니다.</div>
+          <div className="text:[11px] text-gray-500">그래프 구간을 클릭하면 해당 5초 구간이 재생됩니다.</div>
         </div>
       );
     }

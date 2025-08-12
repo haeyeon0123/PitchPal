@@ -1,4 +1,6 @@
 // 음성 분석 페이지 (더미데이터 Ver.)
+// 업로드 박스 UI 수정본 반영 이전 버전
+
 import React, { useState, useRef, useEffect } from 'react';
 import {
   Radar, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis,
@@ -334,7 +336,7 @@ function ResultSection({ result, audioUrl, audioRef, onReplay, onReload, radarDa
 
 
       {/* 하단 버튼 */}
-      <div className="flex flex-col sm:flex-row justify-center sm:justify-end items-center space-y-3 sm:space-y-0 sm:space-x-4 mt-2">
+      <div className="mt-10 mb-8 flex flex-wrap items-center justify-center gap-3">
         <button
           onClick={onReplay}
           className="w-full sm:w-auto px-6 py-3 text-white font-semibold rounded-lg transition"

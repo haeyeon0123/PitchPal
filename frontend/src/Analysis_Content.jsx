@@ -1,13 +1,10 @@
 // 내용 분석 페이지 (백엔드 연동용 Ver.)
-// - 서버가 JSON(원문/교정문/강조HTML/피드백텍스트)까지 주면 UI 카드에 렌더
-// - 서버가 html_url만 주더라도 링크로 결과 HTML 열람 가능(폴백)
 
 import React, { useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import './Analysis_Content.css';
 import {
-  CloudUpload, AlertTriangle, ExternalLink,
-  FileText, Hash, ListChecks, ClipboardCopy, Wand2
+  ExternalLink, FileText, Hash, ListChecks, ClipboardCopy, Wand2
 } from 'lucide-react';
 import {
   RadarChart, Radar, PolarGrid, PolarAngleAxis,
@@ -31,7 +28,6 @@ const COLOR_SECONDARY = '#A68ED5'; // 분석 시작/링크 버튼
 function naiveHighlight(original = '', corrected = '') {
   if (!original || !corrected) return corrected;
   try {
-    // 아주 단순한 토큰 비교 (빠른 폴백용)
     const o = original.split(/\s+/);
     const c = corrected.split(/\s+/);
     const map = new Map();
@@ -58,9 +54,9 @@ function countHighlightedSpans(html = '') {
 
 // ===================== 컴포넌트 =====================
 export default function Analysis_Content() {
-  // 업로드 상태
-  const [file, setFile] = useState(null);
-  const [fileName, setFileName] = useState('');
+  // === [업로드 박스 - 음성분석과 통일] ===
+  const scriptInputRef = useRef(null);
+  const [fileInfo, setFileInfo] = useState({ script: null });
 
   // 요청/응답 상태
   const [loading, setLoading] = useState(false);
@@ -77,8 +73,6 @@ export default function Analysis_Content() {
   // 탭 상태
   const [tab, setTab] = useState('original'); // 'original' | 'corrected'
 
-  const fileInputRef = useRef(null);
-
   // 간단한 통계: 단어 수, 수정 개수(강조 span 카운트), 평균 오류(근사)
   const stats = useMemo(() => {
     const wc = correctedText ? correctedText.trim().split(/\s+/).filter(Boolean).length : 0;
@@ -89,7 +83,6 @@ export default function Analysis_Content() {
 
   // 레이더(임시): 서버 점수가 없으므로 시연용 계산치(원하면 제거 가능)
   const radarData = useMemo(() => {
-    // 강조 개수를 기반으로 임시 점수(낮을수록 좋은데 0~10 스케일 반전)
     const penalty = Math.min(10, countHighlightedSpans(highlightedHtml) / 5);
     const base = 8.5 - penalty * 0.5;
     const clamp = (n) => Math.max(0, Math.min(10, n));
@@ -102,18 +95,9 @@ export default function Analysis_Content() {
     ];
   }, [highlightedHtml]);
 
-  // 파일 선택
-  const onChangeFile = (e) => {
-    const f = e.target.files?.[0];
-    if (!f) return;
-    setFile(f);
-    setFileName(f.name);
-  };
-
   // 초기화
   const resetAll = () => {
-    setFile(null);
-    setFileName('');
+    setFileInfo({ script: null });
     setLoading(false);
     setProgress(0);
     setError(null);
@@ -123,13 +107,14 @@ export default function Analysis_Content() {
     setFeedbackText('');
     setHtmlUrl('');
     setTab('original');
+    if (scriptInputRef.current) scriptInputRef.current.value = '';
   };
 
   // === 업로드 & 실행: /content/run ===
   const handleRun = async () => {
     setError(null);
 
-    if (!file) {
+    if (!fileInfo.script) {
       setError('분석할 텍스트 파일(.txt)을 선택해주세요.');
       return;
     }
@@ -140,7 +125,7 @@ export default function Analysis_Content() {
 
       const form = new FormData();
       // 백엔드에서 저장 후 run_spellcheck_and_analysis(path) 호출
-      form.append('script', file); // ← 서버에서 이 이름으로 받게 해줘(아래 FastAPI 예시 제공)
+      form.append('script', fileInfo.script); // ← 서버에서 이 이름으로 받게 해줘
 
       const { data } = await axios.post(`${API_BASE}/content/run`, form, {
         headers: { 'Content-Type': 'multipart/form-data' },
@@ -151,19 +136,18 @@ export default function Analysis_Content() {
         timeout: 120_000,
       });
 
-      // 서버가 리턴해줄 수 있는 필드들(권장 스펙)
+      // 서버 권장 응답 스펙
       // {
       //   html_url: "/static/corrected_result.html",
       //   original_text: "...",
       //   corrected_text: "...",
       //   highlighted_html: "<span ...>...</span>",
-      //   feedback_text: "..."     // perform_analysis의 결과
+      //   feedback_text: "..."
       // }
       setHtmlUrl(data?.html_url || '');
       setOriginalText(data?.original_text || '');
       setCorrectedText(data?.corrected_text || '');
 
-      // 강조 HTML이 있으면 그대로 사용, 없으면 폴백 계산
       if (data?.highlighted_html) {
         setHighlightedHtml(data.highlighted_html);
       } else if (data?.original_text && data?.corrected_text) {
@@ -201,27 +185,43 @@ export default function Analysis_Content() {
 
   return (
     <div className="mx-auto w-full p-8 space-y-10 max-w-[1400px]">
-      {/* 업로드 박스 */}
-      <div className="max-w-2xl mx-auto p-8 border border-gray-200 bg-white rounded-lg">
-        <div className="flex items-center gap-3 mb-2">
-          <CloudUpload className="w-6 h-6 text-gray-500" />
-          <h3 className="text-lg font-semibold">대본 파일 업로드(.txt)</h3>
+      {/* ================= 업로드 박스 (음성분석과 톤/레이아웃 통일) ================= */}
+      <div className="max-w-xl mx-auto p-8 border border-gray-200 bg-[#f7f9fc] rounded-lg text-center">
+        <FileText className="mx-auto mb-4 w-12 h-12 text-gray-400" />
+        <h3 className="text-lg font-medium mb-2">대본 파일 업로드</h3>
+        <p className="text-sm text-gray-500 mb-4">.txt 파일 업로드 가능</p>
+
+        {/* 숨김 input */}
+        <input
+          type="file"
+          accept=".txt"
+          ref={scriptInputRef}
+          className="hidden"
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            if (file) setFileInfo((prev) => ({ ...prev, script: file }));
+          }}
+        />
+
+        {/* 버튼 (라운드형, 흰색, 보더) */}
+        <div className="flex justify-center gap-4">
+          <button
+            onClick={() => scriptInputRef.current?.click()}
+            className="px-6 py-3 bg-white rounded-full border border-gray-300 hover:bg-gray-100 transition"
+          >
+            대본 파일 선택
+          </button>
         </div>
 
-        <div className="space-y-2">
-          <div className="flex items-center gap-4">
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".txt"
-              onChange={onChangeFile}
-              className="block w-full text-sm text-gray-700 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-gray-100 hover:file:bg-gray-200"
-            />
-          </div>
-          {fileName && <p className="text-xs text-gray-500">{fileName}</p>}
-        </div>
+        {/* 파일명 표시 */}
+        {fileInfo.script && (
+          <p className="text-sm text-gray-600 mt-4">
+            📝 {fileInfo.script.name}
+          </p>
+        )}
 
-        <div className="mt-6 flex items-center gap-3">
+        {/* 실행/초기화 버튼 + 진행도/에러 (업로드 박스 안쪽에 유지) */}
+        <div className="mt-6 flex items-center justify-center gap-3">
           <button
             onClick={handleRun}
             disabled={loading}
@@ -255,13 +255,12 @@ export default function Analysis_Content() {
 
         {error && (
           <div className="mt-4 p-3 rounded-md bg-red-50 border border-red-200 text-sm text-red-700">
-            <AlertTriangle className="inline-block w-4 h-4 mr-1" />
             {error}
           </div>
         )}
       </div>
 
-      {/* 결과 */}
+      {/* ================= 결과 ================= */}
       {(originalText || correctedText || htmlUrl) && (
         <div className="space-y-10">
           {/* 요약 통계 */}
@@ -330,7 +329,7 @@ export default function Analysis_Content() {
             </section>
           )}
 
-          {/* 강조/하이라이트 미리보기(서버 제공 또는 폴백 계산) */}
+          {/* 강조/하이라이트 미리보기 */}
           {highlightedHtml && (
             <section className="rounded-lg border bg-white">
               <div className="flex items-center justify-between p-4">
@@ -372,7 +371,7 @@ export default function Analysis_Content() {
             </div>
           </section>
 
-          {/* 내용 피드백 텍스트(perform_analysis 결과가 있을 때) */}
+          {/* 내용 피드백 텍스트 */}
           {feedbackText && (
             <section className="rounded-lg border bg-white">
               <div className="flex items-center justify-between p-4">
