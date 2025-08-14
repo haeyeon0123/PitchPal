@@ -1,30 +1,57 @@
-import os
+import os, sys
+
+try:
+    from model.speech.utils.serialize import dump_json, ensure_dir
+except ModuleNotFoundError:
+    try:
+        from ...speech.utils.serialize import dump_json, ensure_dir  # when run as package
+    except Exception:
+        ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
+        if ROOT not in sys.path:
+            sys.path.insert(0, ROOT)
+        from model.speech.utils.serialize import dump_json, ensure_dir  # final attempt
+        
 import re
-import json
 import difflib
+from datetime import datetime, timezone, timedelta
+
 from dotenv import load_dotenv
-from openai import OpenAI
-from core import content_analysis
+from model.speech.utils.serialize import dump_json, ensure_dir
+from core import content_analysis  # 기존 경로 유지
 
 # .env에서 OpenAI API 키 로드
 load_dotenv()
-api_key = os.getenv("OPENAI_API_KEY")
-client = OpenAI(api_key=api_key)
+KST = timezone(timedelta(hours=9))
 
-def read_text_file(file_path):
+def read_text_file(file_path: str) -> str:
     with open(file_path, 'r', encoding='utf-8') as f:
         return f.read()
+    
 
-def gpt_spell_check(text):
-    """GPT를 이용한 맞춤법 및 문장 교정"""
-    response = client.chat.completions.create(
-        model="gpt-3.5-turbo",
-        messages=[
-            {"role": "user", "content": f"다음 문장의 맞춤법과 문장을 자연스럽게 고쳐 주세요:\n\n{text}"}
-        ],
-        temperature=0.2
-    )
-    return response.choices[0].message.content.strip()
+def gpt_spell_check(text: str) -> str:
+    """
+    GPT를 이용한 맞춤법/문장 교정.
+    - OPENAI_API_KEY가 없거나, 호출 실패 시 원문을 그대로 반환(폴백).
+    """
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return text  # 폴백
+
+    try:
+        from openai import OpenAI  # 지연 임포트
+        client = OpenAI(api_key=api_key)
+        response = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "user", "content": f"다음 문장의 맞춤법과 문장을 자연스럽게 고쳐 주세요:\n\n{text}"}
+            ],
+            temperature=0.2
+        )
+        return response.choices[0].message.content.strip()
+    except Exception:
+        # API 호출 실패 시에도 폴백
+        return text
+    
 
 def highlight_differences(original, corrected):
     """원본과 교정된 텍스트를 비교하여 변경된 부분을 <span style="color:red">로 강조"""
@@ -45,8 +72,33 @@ def highlight_differences(original, corrected):
 
     return ' '.join(highlighted)
 
-def save_html(output_path, original, corrected, highlighted_text):
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+def highlight_differences(original: str, corrected: str) -> str:
+    """
+    원본과 교정된 텍스트를 비교하여 변경된 부분을 <span style="color:red">로 강조.
+    단어 시퀀스 매칭 기반 단순 하이라이팅.
+    """
+    original_words = original.split()
+    corrected_words = corrected.split()
+
+    matcher = difflib.SequenceMatcher(None, original_words, corrected_words)
+    highlighted = []
+
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == 'equal':
+            highlighted.extend(corrected_words[j1:j2])
+        elif tag in ('replace', 'insert'):
+            for word in corrected_words[j1:j2]:
+                highlighted.append(f'<span style="color:red;">{word}</span>')
+        elif tag == 'delete':
+            # 삭제 단어는 표시하지 않음
+            continue
+
+    return ' '.join(highlighted)
+
+
+def save_html(output_path: str, original: str, corrected: str, highlighted_text: str):
+    ensure_dir(output_path)
 
     html_content = f"""
     <!DOCTYPE html>
@@ -61,9 +113,7 @@ def save_html(output_path, original, corrected, highlighted_text):
                 background-color: #f9f9f9;
                 color: #333;
             }}
-            h1 {{
-                color: #333366;
-            }}
+            h1 {{ color: #333366; }}
             .section {{
                 background: white;
                 padding: 20px;
@@ -72,9 +122,7 @@ def save_html(output_path, original, corrected, highlighted_text):
                 box-shadow: 0 2px 5px rgba(0,0,0,0.1);
                 white-space: pre-wrap;
             }}
-            .highlight span {{
-                font-weight: bold;
-            }}
+            .highlight span {{ font-weight: bold; }}
         </style>
     </head>
     <body>
@@ -100,37 +148,16 @@ def save_html(output_path, original, corrected, highlighted_text):
 
     print(f"맞춤법 교정 결과 HTML 저장 완료: {output_path}")
 
-# ===== JSON 저장 유틸 =====
-def _to_serializable(obj):
-    """넘파이/세트/날짜 등 직렬화 안전 변환"""
-    try:
-        import numpy as np
-        if isinstance(obj, (np.integer, np.floating)):
-            return obj.item()
-        if isinstance(obj, np.ndarray):
-            return obj.tolist()
-    except Exception:
-        pass
-    if isinstance(obj, set):
-        return list(obj)
-    # datetime은 content_analysis 쪽에서 반환할 수도 있어 대비
-    import datetime
-    if isinstance(obj, (datetime.datetime, datetime.date)):
-        return obj.isoformat()
-    return obj
-
-def save_json(output_path, payload):
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2, default=_to_serializable)
-    print(f"맞춤법 교정 + 내용 피드백 JSON 저장 완료: {output_path}")
 
 def _count_spans(highlighted_html: str) -> int:
     """하이라이트된 단어(<span ...>) 개수를 간단한 수정 건수로 집계"""
     return len(re.findall(r"<span\b", highlighted_html))
 
-def run_spellcheck_and_analysis(input_path):
-    """main.py에서 호출: 텍스트 교정 후 content_analysis로 전달 + JSON/HTML 저장"""
+
+def run_spellcheck_and_analysis(input_path: str):
+    """
+    텍스트 교정 → 하이라이트 HTML 저장 → 내용 분석(perform_analysis) 호출 → JSON 저장
+    """
     original_text = read_text_file(input_path)
 
     # 1) 교정
@@ -153,8 +180,10 @@ def run_spellcheck_and_analysis(input_path):
     # 5) JSON 저장(동일 정보 + 분석 결과)
     payload = {
         "meta": {
+            "created_at": datetime.now(KST).isoformat(),
             "source_text_path": input_path,
-            "language": "ko"
+            "language": "ko",
+            "html_url": "/" + html_path if not html_path.startswith("/") else html_path,
         },
         "spell_check": {
             "original_text": original_text,
@@ -164,7 +193,9 @@ def run_spellcheck_and_analysis(input_path):
         },
         "content_feedback": analysis_result  # dict 형태 권장
     }
-    save_json(json_path, payload)
+    ensure_dir(json_path)
+    dump_json(payload, json_path, ensure_ascii=False, indent=2)
+    print(f"맞춤법 교정 + 내용 피드백 JSON 저장 완료: {json_path}")
 
     # 필요 시 반환
     return {"html_path": html_path, "json_path": json_path}
