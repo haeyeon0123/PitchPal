@@ -17,7 +17,7 @@ from datetime import datetime, timezone, timedelta
 
 from dotenv import load_dotenv
 from model.speech.utils.serialize import dump_json, ensure_dir
-from core import content_analysis  # 기존 경로 유지
+from model.content.core import content_analysis  # 기존 경로 유지
 
 # .env에서 OpenAI API 키 로드
 load_dotenv()

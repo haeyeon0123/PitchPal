@@ -1,15 +1,4 @@
 import os, sys
-
-try:
-    from model.content.core import content_analysis
-except ModuleNotFoundError:
-    try:
-        from . import content_analysis
-    except Exception:
-        ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
-        if ROOT not in sys.path:
-            sys.path.insert(0, ROOT)
-        from model.content.core import content_analysis
         
 from datetime import datetime, timezone, timedelta
 from model.speech.utils.serialize import dump_json, ensure_dir

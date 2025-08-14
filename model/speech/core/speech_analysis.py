@@ -12,17 +12,17 @@ import os
 import librosa
 import numpy as np
 
-from core.stt_pronunciation import (
+from model.speech.core.stt_pronunciation import (
     transcribe_audio,
     export_differences_to_html,
     load_whisper_model,
 )
 
-from core.stt_pronunciation import transcribe_audio, export_differences_to_html, load_whisper_model
-from utils.text_utils import evaluate_pronunciation
-from core.filler_words import detect_filler_words  
-from core.pause_ratio_calculator import calculate_pause_ratio
-from utils.serialize import dump_json
+from model.speech.core.stt_pronunciation import transcribe_audio, export_differences_to_html, load_whisper_model
+from model.speech.utils.text_utils import evaluate_pronunciation
+from model.speech.core.filler_words import detect_filler_words  
+from model.speech.core.pause_ratio_calculator import calculate_pause_ratio
+from model.speech.utils.serialize import dump_json
 
 # -----------------------------
 # I/O helpers

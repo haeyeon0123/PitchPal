@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Dict, Any
 from pathlib import Path
-import shutil, os, uuid
+import shutil, uuid
 
 from model.content.core.spell_checker import run_spellcheck_and_analysis
 from model.speech.core.speech_analysis import analyze_speech
