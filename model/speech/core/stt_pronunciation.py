@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 from typing import Tuple, List
 from faster_whisper import WhisperModel
-from utils.text_utils import tokenize, get_diff_indices
+from model.speech.utils.text_utils import tokenize, get_diff_indices
 
 # -----------------------------
 # Model caching
