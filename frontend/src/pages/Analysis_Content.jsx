@@ -1,6 +1,6 @@
-// 내용 분석 페이지 (백엔드 연동용 Ver.)
+// 내용 분석 페이지 (백엔드 연동 완료, 레이더차트만 연동하면 됨)
 
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useMemo, useRef, useState, useEffect } from 'react';
 import axios from 'axios';
 import {
   ExternalLink, FileText, Hash, ListChecks, ClipboardCopy, Wand2
@@ -14,16 +14,23 @@ import {
 const API_BASE =
   (typeof process !== 'undefined' &&
     process.env &&
-    process.env.REACT_APP_API_BASE_URL &&
-    process.env.REACT_APP_API_BASE_URL.replace(/\/+$/, '')) ||
+    process.env.REACT_APP_API_BASE &&
+    process.env.REACT_APP_API_BASE.replace(/\/+$/, '')) ||
   'http://localhost:8000';
+
+// 상대경로 html_url을 절대경로로 보정 (선택)
+const resolveUrl = (u) => {
+  if (!u) return '';
+  if (u.startsWith('http://') || u.startsWith('https://')) return u;
+  return `${API_BASE}${u.startsWith('/') ? u : `/${u}`}`;
+};
 
 // 프론트 UI 색상
 const COLOR_PRIMARY = '#6EAED5';   // 교정문 복사 버튼
 const COLOR_SECONDARY = '#A68ED5'; // 분석 시작/링크 버튼
 
 // ===================== 보조 유틸 =====================
-// 서버가 "강조 HTML"을 안 주는 경우를 대비해서 간단한 하이라이트(옵션)
+// 서버가 "강조 HTML"을 안 주는 경우 대비한 간단 하이라이트(옵션)
 function naiveHighlight(original = '', corrected = '') {
   if (!original || !corrected) return corrected;
   try {
@@ -53,34 +60,35 @@ function countHighlightedSpans(html = '') {
 
 // ===================== 컴포넌트 =====================
 export default function Analysis_Content() {
-  // === [업로드 박스 - 음성분석과 통일] ===
+  // === [업로드 박스] ===
   const scriptInputRef = useRef(null);
   const [fileInfo, setFileInfo] = useState({ script: null });
 
   // 요청/응답 상태
   const [loading, setLoading] = useState(false);
-  const [progress, setProgress] = useState(0);
+  const [progress, setProgress] = useState(0);                  // [PROGRESS] 서버 진행률 %
+  const [progressMessage, setProgressMessage] = useState('');   // [PROGRESS] 서버 메시지
   const [error, setError] = useState(null);
 
-  // 결과 데이터(서버 JSON을 기대, 없으면 일부는 폴백 계산)
+  // 결과 데이터
   const [originalText, setOriginalText] = useState('');
   const [correctedText, setCorrectedText] = useState('');
   const [highlightedHtml, setHighlightedHtml] = useState(''); // 서버가 준 강조 HTML(또는 폴백)
-  const [feedbackText, setFeedbackText] = useState('');       // perform_analysis 결과 텍스트(있으면)
+  const [feedbackText, setFeedbackText] = useState('');       // AI 피드백 텍스트(옵션)
   const [htmlUrl, setHtmlUrl] = useState('');                 // corrected_result.html 접근 URL
 
   // 탭 상태
   const [tab, setTab] = useState('original'); // 'original' | 'corrected'
 
-  // 간단한 통계: 단어 수, 수정 개수(강조 span 카운트), 평균 오류(근사)
+  // 간단 통계
   const stats = useMemo(() => {
     const wc = correctedText ? correctedText.trim().split(/\s+/).filter(Boolean).length : 0;
     const errorCount = countHighlightedSpans(highlightedHtml);
-    const avgErrors = wc > 0 ? errorCount / Math.max(1, Math.round(wc / 20)) : 0; // 대략 문장 20단어 가정
+    const avgErrors = wc > 0 ? errorCount / Math.max(1, Math.round(wc / 20)) : 0; // 문장 20단어 가정
     return { wordCount: wc, errorCount, avgErrors: Number(avgErrors.toFixed(2)) };
   }, [correctedText, highlightedHtml]);
 
-  // 레이더(임시): 서버 점수가 없으므로 시연용 계산치(원하면 제거 가능)
+  // 레이더(임시) - 시연용 계산치
   const radarData = useMemo(() => {
     const penalty = Math.min(10, countHighlightedSpans(highlightedHtml) / 5);
     const base = 8.5 - penalty * 0.5;
@@ -94,11 +102,19 @@ export default function Analysis_Content() {
     ];
   }, [highlightedHtml]);
 
+  // 언마운트 시 폴링 정리
+  useEffect(() => {
+    return () => {
+      // 컴포넌트가 사라질 때 setInterval 정리 (handleRun 내부에서 관리하므로 여기선 보조용)
+    };
+  }, []);
+
   // 초기화
   const resetAll = () => {
     setFileInfo({ script: null });
     setLoading(false);
     setProgress(0);
+    setProgressMessage('');
     setError(null);
     setOriginalText('');
     setCorrectedText('');
@@ -109,7 +125,7 @@ export default function Analysis_Content() {
     if (scriptInputRef.current) scriptInputRef.current.value = '';
   };
 
-  // === 업로드 & 실행: /content/run ===
+  // === [PROGRESS] 업로드 & 실행: /content/start → /content/progress → /content/result ===
   const handleRun = async () => {
     setError(null);
 
@@ -118,32 +134,69 @@ export default function Analysis_Content() {
       return;
     }
 
+    let pollId = null;
+
     try {
       setLoading(true);
       setProgress(0);
+      setProgressMessage('준비 중…');
 
-      const form = new FormData();
-      // 백엔드에서 저장 후 run_spellcheck_and_analysis(path) 호출
-      form.append('script', fileInfo.script); // ← 서버에서 이 이름으로 받게 해줘
+      // 파일 → 텍스트
+      let scriptText = '';
+      if (fileInfo.script instanceof File) {
+        scriptText = await fileInfo.script.text();  // 파일 → 문자열
+      } else if (typeof fileInfo.script === 'string') {
+        scriptText = fileInfo.script;
+      }
 
-      const { data } = await axios.post(`${API_BASE}/content/run`, form, {
-        headers: { 'Content-Type': 'multipart/form-data' },
-        onUploadProgress: (pe) => {
-          if (!pe.total) return;
-          setProgress(Math.min(95, Math.round((pe.loaded * 100) / pe.total)));
-        },
-        timeout: 120_000,
+      // 1) 작업 시작 → job_id 수신
+      const startRes = await axios.post(`${API_BASE}/content/start`, { script: scriptText });
+      const jobId = startRes?.data?.job_id;
+      if (!jobId) {
+        throw new Error('job_id를 받지 못했습니다.');
+      }
+
+      // 2) 진행률 폴링
+      await new Promise((resolve, reject) => {
+        const startedAt = Date.now();
+        pollId = setInterval(async () => {
+          try {
+            const { data: p } = await axios.get(`${API_BASE}/content/progress/${jobId}`);
+            // p: { job_id, progress, status, message }
+            if (typeof p?.progress === 'number') setProgress(p.progress);
+            if (p?.message) setProgressMessage(p.message);
+
+            if (p?.status === 'error') {
+              clearInterval(pollId);
+              pollId = null;
+              reject(new Error(p?.message || '서버 에러'));
+              return;
+            }
+            if (p?.status === 'done' && (p?.progress ?? 0) >= 100) {
+              clearInterval(pollId);
+              pollId = null;
+              resolve(null);
+              return;
+            }
+
+            // 안전장치: 10분 초과 시 중단
+            if (Date.now() - startedAt > 10 * 60 * 1000) {
+              clearInterval(pollId);
+              pollId = null;
+              reject(new Error('타임아웃(10분)'));
+            }
+          } catch (e) {
+            clearInterval(pollId);
+            pollId = null;
+            reject(e);
+          }
+        }, 500); // 0.5초 폴링
       });
 
-      // 서버 권장 응답 스펙
-      // {
-      //   html_url: "/static/corrected_result.html",
-      //   original_text: "...",
-      //   corrected_text: "...",
-      //   highlighted_html: "<span ...>...</span>",
-      //   feedback_text: "..."
-      // }
-      setHtmlUrl(data?.html_url || '');
+      // 3) 최종 결과 조회
+      const { data } = await axios.get(`${API_BASE}/content/result/${jobId}`);
+
+      setHtmlUrl(resolveUrl(data?.html_url || ''));
       setOriginalText(data?.original_text || '');
       setCorrectedText(data?.corrected_text || '');
 
@@ -156,18 +209,20 @@ export default function Analysis_Content() {
       }
 
       setFeedbackText(data?.feedback_text || '');
-
       setProgress(100);
+      setProgressMessage('완료');
     } catch (err) {
       console.error(err);
       if (err?.response) {
         setError(`서버 오류(${err.response.status}): ${err.response.data?.detail || '자세한 로그를 확인하세요.'}`);
-      } else if (err?.code === 'ECONNABORTED') {
-        setError('요청 시간이 초과되었습니다. 텍스트 크기를 줄이거나 다시 시도해주세요.');
       } else {
-        setError('네트워크/CORS 문제일 수 있어요. FastAPI CORS를 확인해주세요.');
+        setError(err?.message || '네트워크/CORS 문제일 수 있어요. FastAPI CORS를 확인해주세요.');
       }
     } finally {
+      if (pollId) {
+        clearInterval(pollId);
+        pollId = null;
+      }
       setLoading(false);
     }
   };
@@ -184,7 +239,7 @@ export default function Analysis_Content() {
 
   return (
     <div className="mx-auto w-full p-8 space-y-10 max-w-[1400px]">
-      {/* ================= 업로드 박스 (음성분석과 톤/레이아웃 통일) ================= */}
+      {/* ================= 업로드 박스 ================= */}
       <div className="max-w-xl mx-auto p-8 border border-gray-200 bg-[#f7f9fc] rounded-lg text-center">
         <FileText className="mx-auto mb-4 w-12 h-12 text-gray-400" />
         <h3 className="text-lg font-medium mb-2">대본 파일 업로드</h3>
@@ -219,7 +274,7 @@ export default function Analysis_Content() {
           </p>
         )}
 
-        {/* 실행/초기화 버튼 + 진행도/에러 (업로드 박스 안쪽에 유지) */}
+        {/* 실행/초기화 버튼 + 진행도/에러 */}
         <div className="mt-6 flex items-center justify-center gap-3">
           <button
             onClick={handleRun}
@@ -240,15 +295,22 @@ export default function Analysis_Content() {
           </button>
         </div>
 
-        {loading && (
+        {/* [PROGRESS] 서버 진행률 바 */}
+        {(loading || progress > 0) && (
           <div className="mt-4">
             <div className="w-full bg-gray-100 rounded-full h-2">
               <div
                 className="h-2 rounded-full"
-                style={{ width: `${progress}%`, backgroundColor: COLOR_SECONDARY, transition: 'width 0.2s ease' }}
+                style={{
+                  width: `${progress}%`,
+                  backgroundColor: COLOR_SECONDARY,
+                  transition: 'width 0.2s ease'
+                }}
               />
             </div>
-            <p className="mt-2 text-xs text-gray-500">업로드 및 분석 진행 중… {progress}%</p>
+            <p className="mt-2 text-xs text-gray-500">
+              {progressMessage || '분석 중…'} {progress}%
+            </p>
           </div>
         )}
 
@@ -318,11 +380,16 @@ export default function Analysis_Content() {
                 </div>
               </div>
 
+              {/* ⬇️ 폰트 통일 포인트: pre → div, font-sans 추가 */}
               <div className="p-5">
                 {tab === 'original' ? (
-                  <pre className="whitespace-pre-wrap break-words text-sm leading-6">{originalText}</pre>
+                  <div className="whitespace-pre-wrap break-words text-sm leading-6 font-sans">
+                    {originalText}
+                  </div>
                 ) : (
-                  <pre className="whitespace-pre-wrap break-words text-sm leading-6">{correctedText}</pre>
+                  <div className="whitespace-pre-wrap break-words text-sm leading-6 font-sans">
+                    {correctedText}
+                  </div>
                 )}
               </div>
             </section>
@@ -337,7 +404,7 @@ export default function Analysis_Content() {
                   <h4 className="font-semibold">교정 강조 표시</h4>
                 </div>
               </div>
-              <div className="px-4 pb-6 text-sm leading-6">
+              <div className="px-4 pb-6 text-sm leading-6 font-sans">
                 <div dangerouslySetInnerHTML={{ __html: highlightedHtml }} />
               </div>
             </section>
@@ -380,7 +447,7 @@ export default function Analysis_Content() {
                 </div>
               </div>
               <div className="px-4 pb-6">
-                <div className="p-4 rounded-md border bg-white text-sm whitespace-pre-wrap leading-6">
+                <div className="p-4 rounded-md border bg-white text-sm whitespace-pre-wrap leading-6 font-sans">
                   {feedbackText}
                 </div>
               </div>
