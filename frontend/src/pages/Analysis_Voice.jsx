@@ -1,6 +1,6 @@
-// 음성 분석 페이지 (백엔드 연동 Ver.)
+// 음성 분석 페이지 (API 호출 완료, 피드백 응답 방식 상의 필요)
+
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import axios from 'axios';
 import {
   Radar, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis,
   ResponsiveContainer,
@@ -14,29 +14,14 @@ import {
   ListChecks, Lightbulb
 } from 'lucide-react';
 
-// ====== FastAPI 서버 베이스 URL (환경변수 우선) ======
-const API_BASE = process.env.REACT_APP_API_BASE || 'http://localhost:8000';
+import { runSpeechAnalysis } from '../services/speechService';
 
-// ✅ 입체 카드 컴포넌트
-function ElevCard({ className = "", children }) {
-  return (
-    <div
-      className={
-        "bg-white rounded-2xl border border-gray-100 shadow-md " +
-        "hover:shadow-xl hover:-translate-y-0.5 transition duration-200 " +
-        className
-      }
-      style={{ boxShadow: "0 6px 18px rgba(24, 39, 75, 0.08)" }}
-    >
-      {children}
-    </div>
-  );
-}
-
-/* ======================= 브랜드 컬러 ======================= */
+// ====== 브랜드 컬러 ======
 const COLOR_PRIMARY   = '#5686C4';
 const COLOR_SECONDARY = '#826BC6';
 const COLOR_ACCENT    = '#3EB489';
+// 업로드 박스의 "분석 시작" 버튼은 요청사항대로 #6EAED5 사용
+const BUTTON_PRIMARY  = '#6EAED5';
 
 /* ======================= 유틸/더미 ======================= */
 const mean = (a) => (a && a.length ? a.reduce((x, y) => x + y, 0) / a.length : 0);
@@ -116,38 +101,46 @@ function SectionHeader({ number = "①", title, hint }) {
   );
 }
 
-/* ======================= API → UI 매핑 ======================= */
-function mapApiToUi(api) {
-  const rs = api.radar_scores || {};
+/* ======================= API → UI 매핑 (service 응답 표준) ======================= */
+/**
+ * service 레이어(runSpeechAnalysis)가 반환하는 표준 응답을
+ * 현재 페이지의 UI 구조(result)로 변환
+ */
+function mapServiceToUi(api) {
+  // 점수: 백엔드가 0~10 스케일이면 /2 해서 0~5로 맞춤(이 페이지에서 *2해 10점 환산 표시)
+  const s = api?.scores || {};
   const to5 = (v) => (typeof v === 'number' ? v / 2 : 0);
 
-  const segs = Array.isArray(api.segments) ? api.segments.map((s) => ({
-    time_range: `${(s.start ?? 0).toFixed(2)}-${(s.end ?? 0).toFixed(2)}`,
-    wpm: s.wpm ?? 0,
-    pitch_mean: s.pitch_mean ?? (api.pitch?.mean ?? 0),
-    mfcc_mean: Array.isArray(s.mfcc_mean) ? s.mfcc_mean : (api.mfcc?.mean ?? []),
-    fillers: Array.isArray(s.fillers) ? s.fillers : [],
-    silence: Array.isArray(s.silence) ? s.silence : [],
-  })) : DUMMY_SEGMENTS;
+  // 세그먼트: start_sec/end_sec → "s-e" 문자열로 통일
+  const segs = Array.isArray(api?.segments) && api.segments.length
+    ? api.segments.map((seg) => ({
+        time_range: `${Number(seg.start_sec ?? 0).toFixed(2)}-${Number(seg.end_sec ?? 0).toFixed(2)}`,
+        wpm: seg.wpm ?? api.wpm ?? 0,
+        pitch_mean: seg.pitch_mean ?? api.pitch_mean ?? 0,
+        mfcc_mean: Array.isArray(seg.mfcc_mean) ? seg.mfcc_mean : (api.mfcc_mean ?? []),
+        fillers: typeof seg.has_filler === 'boolean' && seg.has_filler ? [midSec(`${seg.start_sec}-${seg.end_sec}`, 0, 5)] : [],
+        silence: seg.is_pause ? [{ start: seg.start_sec ?? 0, end: seg.end_sec ?? 0 }] : [],
+      }))
+    : DUMMY_SEGMENTS;
 
   return {
     scores: {
-      pronunciation: to5(rs.pronunciation),
-      intonation:    to5(rs.intonation),
-      speed:         to5(rs.speed),
-      filler:        to5(rs.fillers),
-      pause:         to5(rs.pause),
-      mfcc:          to5(rs.mfcc),
+      pronunciation: to5(s.pronunciation),
+      intonation:    to5(s.intonation),
+      speed:         to5(s.speed),
+      filler:        to5(s.filler ?? s.fillers),
+      pause:         to5(s.pause),
+      mfcc:          to5(s.mfcc),
     },
     features: {
-      pronunciation_accuracy: api.pronunciation_accuracy ?? 0,
-      wpm: api.wpm ?? 0,
-      filler_count: api.filler_count ?? 0,
-      pause_ratio: api.pause_ratio ?? 0,
+      pronunciation_accuracy: api?.pronunciation_accuracy ?? 0,
+      wpm: api?.wpm ?? 0,
+      filler_count: api?.filler_count ?? 0,
+      pause_ratio: api?.pause_ratio ?? 0,
     },
-    feedback: api.feedback?.summary || "분석 결과를 불러왔습니다. 상세 항목을 확인해 보세요.",
-    feedback_bullets: api.feedback?.bullets || [],
-    stt_html_url: api.stt_result_url || "/model/speech/results/stt_results.html",
+    feedback: api?.feedback_text || "분석 결과를 불러왔습니다. 상세 항목을 확인해 보세요.",
+    feedback_bullets: [], // 필요 시 백엔드 확장
+    stt_html_url: api?.stt_results_abs_url || api?.stt_results_url || null,
     segments: segs,
   };
 }
@@ -165,10 +158,10 @@ export default function AnalysisVoice() {
   const scriptInputRef = useRef(null);
   const audioRef = useRef(null);
 
-  /** 실제 FastAPI 호출: POST /analyze-voice (multipart) */
+  /** 실제 FastAPI 호출: multipart 업로드만 전송 (세그먼트 JSON 전송 없음) */
   const handleAnalyze = useCallback(async () => {
     if (!fileInfo.audio || !fileInfo.script) {
-      setError('음성 파일과 대본(.txt) 파일을 모두 선택해주세요.');
+      setError('음성 파일(.mp3/.wav)과 대본(.txt) 파일을 모두 선택해주세요.');
       return;
     }
     setError(null);
@@ -177,44 +170,29 @@ export default function AnalysisVoice() {
     setProgress(5);
 
     try {
-      const form = new FormData();
-      form.append("audio", fileInfo.audio);
-      form.append("script", fileInfo.script);
-
-      const res = await axios.post(`${API_BASE}/analyze-voice`, form, {
-        headers: { "Content-Type": "multipart/form-data" },
-        onUploadProgress: (pe) => {
-          if (!pe.total) return;
-          const ratio = pe.loaded / pe.total;
-          const prog = Math.max(5, Math.min(95, Math.round(5 + ratio * 90)));
-          setProgress(prog);
-        },
-        timeout: 180_000,
+      const api = await runSpeechAnalysis(fileInfo.audio, fileInfo.script, (p) => {
+        const prog = Math.max(5, Math.min(95, Math.round(5 + (p / 100) * 90)));
+        setProgress(prog);
       });
-
-      const ui = mapApiToUi(res.data || {});
+      const ui = mapServiceToUi(api);
       setResult(ui);
       setProgress(100);
     } catch (e) {
-      console.error('axios error', e);
-      const msg =
+      console.error('analysis error', e);
+      // 흔한 실수: 파일 전용 라우트가 아닌 평가 라우트(JSON 바디)로 보낼 때 뜨는 Pydantic 에러 가독화
+      const raw =
         e?.response?.data?.detail ||
-        e?.response?.statusText ||
-        (e?.message === 'Network Error'
-          ? '서버에 연결할 수 없어요 (CORS/서버 중지/주소 오류 가능).'
-          : e?.message) ||
+        e?.message ||
         '분석 중 오류가 발생했어요.';
-      setError(msg);
+      const friendly = /start_sec|end_sec/.test(String(raw))
+        ? '서버가 세그먼트 JSON을 요구하는 라우트로 요청이 간 것 같아요. 서비스 레이어가 파일 업로드용 엔드포인트(/speech/run 또는 /speech/analyze)로 향하는지 확인해주세요.'
+        : raw;
+      setError(friendly);
       setProgress(0);
     } finally {
       setLoading(false);
     }
   }, [fileInfo.audio, fileInfo.script]);
-
-  // 🔁 자동 분석 제거(내용분석과 동일: 수동 시작)
-  // useEffect(() => {
-  //   if (fileInfo.audio && fileInfo.script) handleAnalyze();
-  // }, [fileInfo.audio, fileInfo.script, handleAnalyze]);
 
   const handleReplay = () => { if (audioRef.current) { audioRef.current.currentTime = 0; audioRef.current.play(); } };
 
@@ -244,7 +222,7 @@ export default function AnalysisVoice() {
 
   return (
     <div className="container mx-auto p-8 space-y-10 max-w-7xl">
-      {/* ================= 업로드 박스: 내용분석과 동일 톤/레이아웃 ================= */}
+      {/* ================= 업로드 박스 ================= */}
       <div className="max-w-xl mx-auto p-8 border border-gray-200 bg-[#f7f9fc] rounded-lg text-center">
         <Mic className="mx-auto mb-4 w-12 h-12 text-gray-400" />
         <h3 className="text-lg font-medium mb-2">음성 파일 업로드</h3>
@@ -252,7 +230,7 @@ export default function AnalysisVoice() {
 
         {/* 숨김 input */}
         <input
-          type="file" accept="audio/*" ref={audioInputRef} className="hidden"
+          type="file" accept=".mp3,.wav" ref={audioInputRef} className="hidden"
           onChange={e => {
             const file = e.target.files?.[0];
             if (file) setFileInfo(prev => ({ ...prev, audio: file, audioUrl: URL.createObjectURL(file) }));
@@ -266,7 +244,7 @@ export default function AnalysisVoice() {
           }}
         />
 
-        {/* 선택 버튼 2개 (라운드형 흰색 버튼) */}
+        {/* 선택 버튼 2개 */}
         <div className="flex justify-center gap-4">
           <button
             onClick={() => audioInputRef.current?.click()}
@@ -291,13 +269,13 @@ export default function AnalysisVoice() {
           </p>
         )}
 
-        {/* 실행/초기화 버튼 + 진행도/에러 (업로드 박스 내부 배치) */}
+        {/* 실행/초기화 + 진행/에러 */}
         <div className="mt-6 flex items-center justify-center gap-3">
           <button
             onClick={handleAnalyze}
             disabled={loading || !fileInfo.audio || !fileInfo.script}
             className="px-4 py-2 rounded-md text-white"
-            style={{ backgroundColor: COLOR_PRIMARY, opacity: (loading || !fileInfo.audio || !fileInfo.script) ? 0.6 : 1 }}
+            style={{ backgroundColor: BUTTON_PRIMARY, opacity: (loading || !fileInfo.audio || !fileInfo.script) ? 0.6 : 1 }}
             title="분석 시작"
           >
             {loading ? '분석 중…' : '분석 시작'}
@@ -337,7 +315,7 @@ export default function AnalysisVoice() {
           result={result}
           audioUrl={fileInfo.audioUrl}
           audioRef={audioRef}
-          onReplay={handleReplay}
+          onReplay={() => { if (audioRef.current) { audioRef.current.currentTime = 0; audioRef.current.play(); } }}
           onReload={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
           radarData={radarData}
         />
@@ -349,6 +327,7 @@ export default function AnalysisVoice() {
 /* ======================= 결과 섹션 ======================= */
 function ResultSection({ result, audioUrl, audioRef, onReplay, onReload, radarData }) {
   const totalScore10 = (Object.values(result.scores).reduce((a, b) => a + b, 0) / 6 * 2).toFixed(1);
+  const sttUrl = result?.stt_html_url || 'model/speech/results/stt_results.html';
 
   return (
     <div className="space-y-10">
@@ -441,9 +420,9 @@ function ResultSection({ result, audioUrl, audioRef, onReplay, onReload, radarDa
         >
           음성 재생
         </button>
-        {result?.stt_html_url && (
+        {sttUrl && (
           <a
-            href={result.stt_html_url}
+            href={sttUrl}
             target="_blank"
             rel="noopener noreferrer"
             className="w-full sm:w-auto flex items-center justify-center gap-2 px-6 py-3 text-white font-semibold rounded-lg transition"
@@ -465,7 +444,7 @@ function ResultSection({ result, audioUrl, audioRef, onReplay, onReload, radarDa
   );
 }
 
-/* ======================= 개선 제안 리스트 (아이콘 포함) ======================= */
+/* ======================= 개선 제안 리스트 ======================= */
 function EnhancedBullets({ result }) {
   const s = result?.scores || {};
   const f = result?.features || {};
@@ -524,7 +503,7 @@ function ChartsBlock({ result, audioRef }) {
       const { start, end } = parseTimeRange(s.time_range);
       const base = Math.min(start, end);
       (s.fillers || []).forEach((t) => {
-        list.push({ time_sec: Number(t), word: "어", duration: 0.3 }); // 절대초 기준
+        list.push({ time_sec: Number(t), word: "어", duration: 0.3 });
       });
     });
     return list.length ? list : DUMMY_FILLERS;
@@ -534,7 +513,7 @@ function ChartsBlock({ result, audioRef }) {
     const list = [];
     (segments || []).forEach((s) => {
       (s.silence || []).forEach((iv) => {
-        list.push({ start_sec: Number(iv.start ?? 0), end_sec: Number(iv.end ?? 0) });
+        list.push({ start_sec: Number(iv.start ?? iv.start_sec ?? 0), end_sec: Number(iv.end ?? iv.end_sec ?? 0) });
       });
     });
     return list.length ? list : DUMMY_SILENCE;
@@ -956,5 +935,21 @@ function MFCCOverall({ segments, audioRef, height = 220 }) {
         </ResponsiveContainer>
       </div>
     </section>
+  );
+}
+
+/* ====== 입체 카드 ====== */
+function ElevCard({ className = "", children }) {
+  return (
+    <div
+      className={
+        "bg-white rounded-2xl border border-gray-100 shadow-md " +
+        "hover:shadow-xl hover:-translate-y-0.5 transition duration-200 " +
+        className
+      }
+      style={{ boxShadow: "0 6px 18px rgba(24, 39, 75, 0.08)" }}
+    >
+      {children}
+    </div>
   );
 }
