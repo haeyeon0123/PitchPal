@@ -11,7 +11,7 @@ import {
 } from 'recharts';
 import {
   CheckCircle, PauseCircle, Slash, Volume2, Activity, Mic, AudioLines, ExternalLink,
-  ListChecks, Lightbulb
+  Lightbulb
 } from 'lucide-react';
 
 import { runSpeechAnalysis } from '../services/speechService';
@@ -384,7 +384,6 @@ export default function AnalysisVoice() {
 /* ======================= 결과 섹션 ======================= */
 function ResultSection({ result, audioUrl, audioRef, onReplay, onReload, radarData }) {
   const totalScore10 = Number(((Object.values(result.scores).reduce((a, b) => a + b, 0) / 6) * 2).toFixed(1));
-  const sttUrl = result?.stt_html_url || 'model/speech/results/stt_results.html';
 
   return (
     <div className="space-y-10">
@@ -395,7 +394,7 @@ function ResultSection({ result, audioUrl, audioRef, onReplay, onReload, radarDa
         </div>
       )}
 
-      {/* 전체 점수 */}
+      {/* 전체 점수(상단) */}
       <div className="text-center text-xl font-semibold text-gray-700">
         🎯 전체 점수: <span style={{ color: COLOR_SECONDARY }}>{Number.isFinite(totalScore10) ? totalScore10 : '0.0'}</span> / 10
       </div>
@@ -428,12 +427,12 @@ function ResultSection({ result, audioUrl, audioRef, onReplay, onReload, radarDa
         </div>
       </section>
 
-      {/* 종합 피드백 */}
+      {/* 최종 점수 및 개선사항 */}
       <section id="summary" className="py-12 -mx-4 sm:mx-0" style={{ backgroundColor: '#f9f8fc' }}>
         <div className="mx-auto w-full max-w-[1400px] px-4">
           <div className="flex items-center gap-3 mb-6">
             <span className="w-8 h-8 flex items-center justify-center rounded-full text-white text-sm font-bold" style={{ backgroundColor: COLOR_SECONDARY }}>②</span>
-            <h2 className="text-lg font-bold text-gray-800">종합 피드백</h2>
+            <h2 className="text-lg font-bold text-gray-800">최종 점수 및 개선사항</h2>
           </div>
 
           <div className="grid md:grid-cols-2 gap-8">
@@ -454,22 +453,30 @@ function ResultSection({ result, audioUrl, audioRef, onReplay, onReload, radarDa
             </ElevCard>
 
             <ElevCard className="p-5">
-              <h3 className="text-sm font-medium mb-3 text-center" style={{ color: COLOR_PRIMARY }}>
-                개선 제안
-              </h3>
-              {/* speech_analysis.py가 전달한 1줄 요약을 가장 위에 강조 노출 */}
+              {/* 카드 상단에 최종 점수 크게 노출 */}
+              <div className="text-center mb-4">
+                <div className="inline-flex items-center justify-center rounded-xl px-4 py-2 text-white text-lg font-bold"
+                     style={{ backgroundColor: COLOR_SECONDARY }}>
+                  총점 {Number.isFinite(totalScore10) ? totalScore10 : '0.0'} / 10
+                </div>
+              </div>
+
+              {/* speech_analysis.py의 요약문구(피드백) 강조 노출 */}
               {result?.feedback && (
                 <div className="mb-4 p-3 rounded-md border text-sm"
                      style={{ background: '#F6F5FF', borderColor: '#E7E4FF', color: '#4B3FA4' }}>
                   {result.feedback}
                 </div>
               )}
-              <EnhancedBullets result={result} />
-              {Array.isArray(result.feedback_bullets) && result.feedback_bullets.length > 0 && (
-                <ul className="list-disc ml-5 mt-4 text-sm text-gray-700">
-                  {result.feedback_bullets.map((b, i) => <li key={`fb-${i}`}>{b}</li>)}
-                </ul>
-              )}
+
+              {/* (요청) 간투사/무음/음색 항목은 제거 */}
+              {/* 필요 시 다른 맞춤 항목을 여기 추가 가능 */}
+              <div className="text-xs flex items-start gap-2 rounded-md bg-gray-50 p-3 border border-gray-100">
+                <Lightbulb className="w-4 h-4" style={{ color: COLOR_SECONDARY }} />
+                <span className="leading-5 text-gray-700">
+                  그래프에서 성과가 좋았던 구간을 반복 청취하고, 점수가 낮은 항목을 개선 목표로 삼아 다음 녹음에서 실험해 보세요.
+                </span>
+              </div>
             </ElevCard>
           </div>
         </div>
@@ -484,18 +491,19 @@ function ResultSection({ result, audioUrl, audioRef, onReplay, onReload, radarDa
         >
           음성 재생
         </button>
-        {sttUrl && (
-          <a
-            href={sttUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="w-full sm:w-auto flex items-center justify-center gap-2 px-6 py-3 text-white font-semibold rounded-lg transition"
-            style={{ backgroundColor: COLOR_PRIMARY }}
-          >
-            <ExternalLink className="w-4 h-4 text-white" />
-            <span>발음 분석 결과</span>
-          </a>
-        )}
+
+        {/* (요청) 고정 경로로 열기 */}
+        <a
+          href="model/speech/results/stt_results.html"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="w-full sm:w-auto flex items-center justify-center gap-2 px-6 py-3 text-white font-semibold rounded-lg transition"
+          style={{ backgroundColor: COLOR_PRIMARY }}
+        >
+          <ExternalLink className="w-4 h-4 text-white" />
+          <span>발음 분석 결과</span>
+        </a>
+
         <button
           onClick={onReload}
           className="w-full sm:w-auto px-6 py-3 border font-normal rounded-lg hover:bg-gray-100 transition"
@@ -503,37 +511,6 @@ function ResultSection({ result, audioUrl, audioRef, onReplay, onReload, radarDa
         >
           다시 분석하기
         </button>
-      </div>
-    </div>
-  );
-}
-
-/* ======================= 개선 제안 리스트 ======================= */
-function EnhancedBullets({ result }) {
-  const s = result?.scores || {};
-  const f = result?.features || {};
-  const items = [
-    { icon: <ListChecks className="w-4 h-4" />, text: `간투사: ${f.filler_count ?? 0}회` },
-    { icon: <ListChecks className="w-4 h-4" />, text: `무음 비율: ${(f.pause_ratio * 100).toFixed(1)}%` },
-    { icon: <ListChecks className="w-4 h-4" />, text: `음색 안정성: ${((s.mfcc ?? 0) * 2).toFixed(1)} / 10` },
-  ];
-  const tip = result?.feedback
-    ? "아래 항목을 참고해 해당 조언을 빠르게 개선해보세요."
-    : "발화 속도/억양의 안정 구간을 유지하면서, 간투사 발생 구간을 클릭-재생해 자기 점검을 반복하면 개선 속도가 빨라집니다.";
-
-  return (
-    <div className="space-y-4">
-      <ul className="text-sm text-gray-800 space-y-2">
-        {items.map((it, i) => (
-          <li key={`it-${i}`} className="flex items-start gap-2">
-            <span className="mt-0.5" style={{ color: COLOR_ACCENT }}>{it.icon}</span>
-            <span>{it.text}</span>
-          </li>
-        ))}
-      </ul>
-      <div className="text-xs flex items-start gap-2 rounded-md bg-gray-50 p-3 border border-gray-100">
-        <Lightbulb className="w-4 h-4" style={{ color: COLOR_SECONDARY }} />
-        <span className="leading-5 text-gray-700">{tip}</span>
       </div>
     </div>
   );
@@ -575,8 +552,7 @@ function ChartsBlock({ result, audioRef }) {
         let t = null, word = '어';
         if (Array.isArray(fv)) {
           const fs = Number(fv[1] ?? 0), fe = Number(fv[2] ?? fs);
-          // 배열 케이스가 절대초라고 가정(팀 코드 기본). 상대초라면 아래 주석 해제:
-          // t = (segStart + fs + segStart + fe) / 2;
+          // 상대초라면 segStart 더하기 — 현재는 절대초 가정
           t = (fs + fe) / 2;
           word = String(fv[0] ?? '어');
         } else if (typeof fv === 'object') {
@@ -607,7 +583,6 @@ function ChartsBlock({ result, audioRef }) {
       (s.silence || []).forEach((iv) => {
         let ss, ee;
         if (Array.isArray(iv)) {
-          // 배열이면 [s,e] (상대초일 가능성 높음)
           ss = Number(segStart + (iv[0] ?? 0));
           ee = Number(segStart + (iv[1] ?? 0));
         } else {
@@ -616,7 +591,6 @@ function ChartsBlock({ result, audioRef }) {
           if (Number.isFinite(sAbs) && Number.isFinite(eAbs)) {
             ss = sAbs; ee = eAbs;
           } else {
-            // 상대초를 객체로 보냈다면
             ss = Number(segStart + (iv.start_rel ?? 0));
             ee = Number(segStart + (iv.end_rel   ?? 0));
           }
