@@ -1,4 +1,4 @@
-// 음성 분석 페이지 (API 호출 완료, 피드백 응답 방식 상의 필요)
+// 음성 분석 페이지
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
@@ -24,6 +24,7 @@ const COLOR_ACCENT    = '#3EB489';
 const BUTTON_PRIMARY  = '#6EAED5';
 
 /* ======================= 유틸/더미 ======================= */
+const clamp = (v, lo = 0, hi = 1) => Math.max(lo, Math.min(hi, v));
 const mean = (a) => (a && a.length ? a.reduce((x, y) => x + y, 0) / a.length : 0);
 
 const midSec = (range, idx, step = 5) => {
@@ -54,7 +55,7 @@ const playSegment = (audioRef, startSec, endSec) => {
   audio.addEventListener('timeupdate', handler);
 };
 
-// 5초 단위 더미 데이터
+// 5초 단위 더미 데이터 (응답 비어있을 때 가드용)
 const DUMMY_SEGMENTS = Array.from({ length: 12 }, (_, i) => ({
   time_range: `${(i * 5).toFixed(2)}-${((i + 1) * 5).toFixed(2)}`,
   wpm: 120 + Math.sin(i * 0.6) * 15 + (i % 5 === 3 ? 25 : 0),
@@ -103,45 +104,105 @@ function SectionHeader({ number = "①", title, hint }) {
 
 /* ======================= API → UI 매핑 (service 응답 표준) ======================= */
 /**
- * service 레이어(runSpeechAnalysis)가 반환하는 표준 응답을
- * 현재 페이지의 UI 구조(result)로 변환
+ * 백엔드(/speech/analyze) 응답 → 이 페이지에서 쓰는 형태로 변환
  */
 function mapServiceToUi(api) {
-  // 점수: 백엔드가 0~10 스케일이면 /2 해서 0~5로 맞춤(이 페이지에서 *2해 10점 환산 표시)
-  const s = api?.scores || {};
-  const to5 = (v) => (typeof v === 'number' ? v / 2 : 0);
+  const pronunciation_accuracy = Number(api?.pronunciation_accuracy ?? api?.발음_유사도_점수 ?? 0) / (api?.발음_유사도_점수 ? 100 : 1);
+  const wpm = Number(api?.wpm ?? 0);
+  const pause_ratio = Number(api?.pause_ratio ?? api?.무음_구간_비율 ?? 0);
+  const filler_count = Number(api?.filler_count ?? api?.간투사_수 ?? 0);
 
-  // 세그먼트: start_sec/end_sec → "s-e" 문자열로 통일
-  const segs = Array.isArray(api?.segments) && api.segments.length
-    ? api.segments.map((seg) => ({
-        time_range: `${Number(seg.start_sec ?? 0).toFixed(2)}-${Number(seg.end_sec ?? 0).toFixed(2)}`,
-        wpm: seg.wpm ?? api.wpm ?? 0,
-        pitch_mean: seg.pitch_mean ?? api.pitch_mean ?? 0,
-        mfcc_mean: Array.isArray(seg.mfcc_mean) ? seg.mfcc_mean : (api.mfcc_mean ?? []),
-        fillers: typeof seg.has_filler === 'boolean' && seg.has_filler ? [midSec(`${seg.start_sec}-${seg.end_sec}`, 0, 5)] : [],
-        silence: seg.is_pause ? [{ start: seg.start_sec ?? 0, end: seg.end_sec ?? 0 }] : [],
-      }))
+  // 1) 세그먼트 변환: {start_sec,end_sec} 혹은 {time_range}
+  const segIn = Array.isArray(api?.segments) ? api.segments : [];
+  const pitchTL = Array.isArray(api?.pitch_timeline) ? api.pitch_timeline : [];
+  const mfccMeanGlobal = Array.isArray(api?.mfcc_mean) ? api.mfcc_mean : [];
+  const segments = segIn.length
+    ? segIn.map((s) => {
+        const start = Number(s.start_sec ?? s.start ?? parseTimeRange(s.time_range ?? '').start ?? 0);
+        const end   = Number(s.end_sec   ?? s.end   ?? parseTimeRange(s.time_range ?? '').end   ?? 0);
+        // 이 세그먼트 시간대의 피치 평균(없으면 가장 가까운 포인트)
+        const inRange = pitchTL.filter(p => Number(p.t) >= start && Number(p.t) <= end).map(p => Number(p.value));
+        let pitch_mean;
+        if (inRange.length) pitch_mean = mean(inRange);
+        else if (pitchTL.length) {
+          const mid = (start + end) / 2;
+          const nearest = pitchTL.reduce((best, cur) => {
+            const d = Math.abs(Number(cur.t) - mid);
+            return d < best.dist ? { dist: d, v: Number(cur.value) } : best;
+          }, { dist: Infinity, v: 0 });
+          pitch_mean = nearest.v;
+        } else { pitch_mean = Number(s.pitch_mean ?? 0); }
+
+        return {
+          time_range: `${start.toFixed(2)}-${end.toFixed(2)}`,
+          wpm: Number(s.wpm ?? 0),
+          pitch_mean,
+          mfcc_mean: Array.isArray(s.mfcc_mean) ? s.mfcc_mean : mfccMeanGlobal,
+          fillers: s.fillers ?? [],
+          silence: s.silence ?? [],
+        };
+      })
     : DUMMY_SEGMENTS;
+
+  // 2) 전역 침묵/간투사 (없으면 아래 ChartsBlock에서 세그먼트 기반으로 보정)
+  const silence = Array.isArray(api?.silence) && api.silence.length
+    ? api.silence.map(iv => ({
+        start_sec: Number(iv.start ?? iv.start_sec ?? 0),
+        end_sec:   Number(iv.end   ?? iv.end_sec   ?? 0),
+      }))
+    : [];
+
+  const fillers = Array.isArray(api?.fillers) && api.fillers.length
+    ? api.fillers
+        .map(f => {
+          if (typeof f === 'object') {
+            const t = Number(f.time ?? f.time_sec ?? (Number.isFinite(f.start_sec) && Number.isFinite(f.end_sec) ? (f.start_sec + f.end_sec)/2 : NaN));
+            return Number.isFinite(t) ? { time_sec: t, word: f.token ?? f.word ?? 'F' } : null;
+          }
+          return null;
+        })
+        .filter(Boolean)
+    : [];
+
+  // 3) 레이더 차트용 점수(0~5) — 휴리스틱
+  const pitchVals = pitchTL.map(p => Number(p.value)).filter(Number.isFinite);
+  const pitchStd = (() => {
+    if (pitchVals.length < 2) return 0;
+    const m = mean(pitchVals);
+    const v = mean(pitchVals.map(v => (v - m) ** 2));
+    return Math.sqrt(v);
+  })();
+  const intonation5 = clamp(pitchStd / 80 * 5, 0, 5);
+  const speed5 = (() => {
+    if (!Number.isFinite(wpm) || wpm <= 0) return 0;
+    const target = 120, sigma = 40;
+    const z = Math.exp(-((wpm - target) ** 2) / (2 * sigma ** 2));
+    return clamp(z * 5, 0, 5);
+  })();
+  const filler5 = clamp((10 - Math.min(10, filler_count)) / 10 * 5, 0, 5);
+  const pause5  = clamp((1 - pause_ratio) * 5, 0, 5);
+  const mfccStd = Array.isArray(api?.mfcc_std) ? api.mfcc_std : [];
+  const mfccStdAvg = mfccStd.length ? mean(mfccStd.map(Math.abs)) : 0;
+  const mfcc5   = clamp((50 - Math.min(50, mfccStdAvg)) / 50 * 5, 0, 5);
 
   return {
     scores: {
-      pronunciation: to5(s.pronunciation),
-      intonation:    to5(s.intonation),
-      speed:         to5(s.speed),
-      filler:        to5(s.filler ?? s.fillers),
-      pause:         to5(s.pause),
-      mfcc:          to5(s.mfcc),
+      pronunciation: clamp(pronunciation_accuracy * 5, 0, 5),
+      intonation:    intonation5,
+      speed:         speed5,
+      filler:        filler5,
+      pause:         pause5,
+      mfcc:          mfcc5,
     },
-    features: {
-      pronunciation_accuracy: api?.pronunciation_accuracy ?? 0,
-      wpm: api?.wpm ?? 0,
-      filler_count: api?.filler_count ?? 0,
-      pause_ratio: api?.pause_ratio ?? 0,
-    },
+    features: { pronunciation_accuracy, wpm, filler_count, pause_ratio },
+    // ← speech_analysis.py의 "발표 평가 요약" 문구가 여기에 들어오도록 백엔드에서 feedback_text를 넣어주세요.
     feedback: api?.feedback_text || "분석 결과를 불러왔습니다. 상세 항목을 확인해 보세요.",
-    feedback_bullets: [], // 필요 시 백엔드 확장
-    stt_html_url: api?.stt_results_abs_url || api?.stt_results_url || null,
-    segments: segs,
+    feedback_bullets: Array.isArray(api?.feedback_bullets) ? api.feedback_bullets : [],
+    stt_html_url: api?.stt_result_url || api?.stt_results_url || null,
+    segments,
+    // 전역 타임라인 데이터(ChartsBlock에서 사용)
+    _globalSilence: silence,
+    _globalFillers: fillers,
   };
 }
 
@@ -158,7 +219,7 @@ export default function AnalysisVoice() {
   const scriptInputRef = useRef(null);
   const audioRef = useRef(null);
 
-  /** 실제 FastAPI 호출: multipart 업로드만 전송 (세그먼트 JSON 전송 없음) */
+  /** 실제 FastAPI 호출: multipart 업로드 */
   const handleAnalyze = useCallback(async () => {
     if (!fileInfo.audio || !fileInfo.script) {
       setError('음성 파일(.mp3/.wav)과 대본(.txt) 파일을 모두 선택해주세요.');
@@ -179,15 +240,11 @@ export default function AnalysisVoice() {
       setProgress(100);
     } catch (e) {
       console.error('analysis error', e);
-      // 흔한 실수: 파일 전용 라우트가 아닌 평가 라우트(JSON 바디)로 보낼 때 뜨는 Pydantic 에러 가독화
       const raw =
         e?.response?.data?.detail ||
         e?.message ||
         '분석 중 오류가 발생했어요.';
-      const friendly = /start_sec|end_sec/.test(String(raw))
-        ? '서버가 세그먼트 JSON을 요구하는 라우트로 요청이 간 것 같아요. 서비스 레이어가 파일 업로드용 엔드포인트(/speech/run 또는 /speech/analyze)로 향하는지 확인해주세요.'
-        : raw;
-      setError(friendly);
+      setError(raw);
       setProgress(0);
     } finally {
       setLoading(false);
@@ -326,7 +383,7 @@ export default function AnalysisVoice() {
 
 /* ======================= 결과 섹션 ======================= */
 function ResultSection({ result, audioUrl, audioRef, onReplay, onReload, radarData }) {
-  const totalScore10 = (Object.values(result.scores).reduce((a, b) => a + b, 0) / 6 * 2).toFixed(1);
+  const totalScore10 = Number(((Object.values(result.scores).reduce((a, b) => a + b, 0) / 6) * 2).toFixed(1));
   const sttUrl = result?.stt_html_url || 'model/speech/results/stt_results.html';
 
   return (
@@ -340,7 +397,7 @@ function ResultSection({ result, audioUrl, audioRef, onReplay, onReload, radarDa
 
       {/* 전체 점수 */}
       <div className="text-center text-xl font-semibold text-gray-700">
-        🎯 전체 점수: <span style={{ color: COLOR_SECONDARY }}>{totalScore10}</span> / 10
+        🎯 전체 점수: <span style={{ color: COLOR_SECONDARY }}>{Number.isFinite(totalScore10) ? totalScore10 : '0.0'}</span> / 10
       </div>
 
       {/* KPI */}
@@ -400,10 +457,17 @@ function ResultSection({ result, audioUrl, audioRef, onReplay, onReload, radarDa
               <h3 className="text-sm font-medium mb-3 text-center" style={{ color: COLOR_PRIMARY }}>
                 개선 제안
               </h3>
+              {/* speech_analysis.py가 전달한 1줄 요약을 가장 위에 강조 노출 */}
+              {result?.feedback && (
+                <div className="mb-4 p-3 rounded-md border text-sm"
+                     style={{ background: '#F6F5FF', borderColor: '#E7E4FF', color: '#4B3FA4' }}>
+                  {result.feedback}
+                </div>
+              )}
               <EnhancedBullets result={result} />
               {Array.isArray(result.feedback_bullets) && result.feedback_bullets.length > 0 && (
                 <ul className="list-disc ml-5 mt-4 text-sm text-gray-700">
-                  {result.feedback_bullets.map((b, i) => <li key={i}>{b}</li>)}
+                  {result.feedback_bullets.map((b, i) => <li key={`fb-${i}`}>{b}</li>)}
                 </ul>
               )}
             </ElevCard>
@@ -453,13 +517,15 @@ function EnhancedBullets({ result }) {
     { icon: <ListChecks className="w-4 h-4" />, text: `무음 비율: ${(f.pause_ratio * 100).toFixed(1)}%` },
     { icon: <ListChecks className="w-4 h-4" />, text: `음색 안정성: ${((s.mfcc ?? 0) * 2).toFixed(1)} / 10` },
   ];
-  const tip = "발화 속도/억양의 안정 구간을 유지하면서, 간투사 발생 구간을 클릭-재생해 자기 점검을 반복하면 개선 속도가 빨라집니다.";
+  const tip = result?.feedback
+    ? "아래 항목을 참고해 해당 조언을 빠르게 개선해보세요."
+    : "발화 속도/억양의 안정 구간을 유지하면서, 간투사 발생 구간을 클릭-재생해 자기 점검을 반복하면 개선 속도가 빨라집니다.";
 
   return (
     <div className="space-y-4">
       <ul className="text-sm text-gray-800 space-y-2">
         {items.map((it, i) => (
-          <li key={i} className="flex items-start gap-2">
+          <li key={`it-${i}`} className="flex items-start gap-2">
             <span className="mt-0.5" style={{ color: COLOR_ACCENT }}>{it.icon}</span>
             <span>{it.text}</span>
           </li>
@@ -497,27 +563,71 @@ function ChartsBlock({ result, audioRef }) {
 
   const segments = result?.segments?.length ? result.segments : DUMMY_SEGMENTS;
 
+  // 옵션 B: 전역이 비어있으면 '세그먼트 상대시간'을 '절대시간'으로 변환해서 사용
   const fillerOccurrences = React.useMemo(() => {
+    if (Array.isArray(result?._globalFillers) && result._globalFillers.length) {
+      return result._globalFillers;
+    }
     const list = [];
     (segments || []).forEach((s) => {
-      const { start, end } = parseTimeRange(s.time_range);
-      const base = Math.min(start, end);
-      (s.fillers || []).forEach((t) => {
-        list.push({ time_sec: Number(t), word: "어", duration: 0.3 });
+      const { start: segStart } = parseTimeRange(s.time_range);
+      (s.fillers || []).forEach((fv) => {
+        let t = null, word = '어';
+        if (Array.isArray(fv)) {
+          const fs = Number(fv[1] ?? 0), fe = Number(fv[2] ?? fs);
+          // 배열 케이스가 절대초라고 가정(팀 코드 기본). 상대초라면 아래 주석 해제:
+          // t = (segStart + fs + segStart + fe) / 2;
+          t = (fs + fe) / 2;
+          word = String(fv[0] ?? '어');
+        } else if (typeof fv === 'object') {
+          if ('time_sec' in fv || 'time' in fv) {
+            t = Number(fv.time_sec ?? fv.time);
+          } else if ('start_sec' in fv || 'end_sec' in fv) {
+            t = Number(((fv.start_sec ?? 0) + (fv.end_sec ?? 0)) / 2);
+          } else if ('start_rel' in fv || 'end_rel' in fv) {
+            const fs = Number(segStart + (fv.start_rel ?? 0));
+            const fe = Number(segStart + (fv.end_rel   ?? (fv.start_rel ?? 0)));
+            t = (fs + fe) / 2;
+          }
+          word = String(fv.word ?? fv.token ?? '어');
+        }
+        if (Number.isFinite(t)) list.push({ time_sec: t, word, duration: 0.3 });
       });
     });
     return list.length ? list : DUMMY_FILLERS;
-  }, [segments]);
+  }, [result, segments]);
 
   const silenceIntervals = React.useMemo(() => {
+    if (Array.isArray(result?._globalSilence) && result._globalSilence.length) {
+      return result._globalSilence;
+    }
     const list = [];
     (segments || []).forEach((s) => {
+      const { start: segStart } = parseTimeRange(s.time_range);
       (s.silence || []).forEach((iv) => {
-        list.push({ start_sec: Number(iv.start ?? iv.start_sec ?? 0), end_sec: Number(iv.end ?? iv.end_sec ?? 0) });
+        let ss, ee;
+        if (Array.isArray(iv)) {
+          // 배열이면 [s,e] (상대초일 가능성 높음)
+          ss = Number(segStart + (iv[0] ?? 0));
+          ee = Number(segStart + (iv[1] ?? 0));
+        } else {
+          const sAbs = Number(iv.start_sec ?? iv.start ?? NaN);
+          const eAbs = Number(iv.end_sec   ?? iv.end   ?? NaN);
+          if (Number.isFinite(sAbs) && Number.isFinite(eAbs)) {
+            ss = sAbs; ee = eAbs;
+          } else {
+            // 상대초를 객체로 보냈다면
+            ss = Number(segStart + (iv.start_rel ?? 0));
+            ee = Number(segStart + (iv.end_rel   ?? 0));
+          }
+        }
+        if (Number.isFinite(ss) && Number.isFinite(ee)) {
+          list.push({ start_sec: ss, end_sec: ee });
+        }
       });
     });
     return list.length ? list : DUMMY_SILENCE;
-  }, [segments]);
+  }, [result, segments]);
 
   return (
     <div className="space-y-4">
@@ -700,11 +810,11 @@ function TimelineStripMini({ segments, silenceIntervals = [], fillerOccurrences 
             <Tooltip formatter={() => ["", ""]} labelFormatter={(v) => `t=${Number(v).toFixed(2)}s`} />
             <Line type="monotone" dataKey="y" dot={false} strokeOpacity={0} />
             {silenceIntervals.map((iv, i) => (
-              <ReferenceArea key={i} x1={iv.start_sec} x2={iv.end_sec} fill={areaFill} />
+              <ReferenceArea key={`sil-${i}`} x1={iv.start_sec} x2={iv.end_sec} fill={areaFill} />
             ))}
             {fillerOccurrences.map((f, i) => (
               <ReferenceDot
-                key={i}
+                key={`fil-${i}`}
                 x={f.time_sec}
                 y={0}
                 r={4}
@@ -728,7 +838,7 @@ function WPMChart({ segments, band = [110, 160], audioRef, height = 220 }) {
 
   const domain = React.useMemo(() => {
     if (!data.length) return [0, 200];
-    const vals = data.map(d => d.wpm).concat(band);
+    const vals = data.map(d => d.wpm).concat(band).filter(Number.isFinite);
     const lo = Math.min(...vals), hi = Math.max(...vals);
     const pad = Math.max(5, (hi - lo) * 0.1);
     return [Math.max(0, Math.floor(lo - pad)), Math.ceil(hi + pad)];
@@ -796,7 +906,7 @@ function PitchChart({ segments, bandScale = 0.2, audioRef, height = 220 }) {
 
   const domain = React.useMemo(() => {
     if (!data.length) return [0, 300];
-    const vals = data.map(d => d.pitch).concat([bandMin, bandMax]);
+    const vals = data.map(d => d.pitch).concat([bandMin, bandMax]).filter(Number.isFinite);
     const lo = Math.min(...vals), hi = Math.max(...vals);
     const pad = Math.max(5, (hi - lo) * 0.1);
     return [Math.max(0, Math.floor(lo - pad)), Math.ceil(hi + pad)];
@@ -864,10 +974,10 @@ function TimelineWithFiller({ segments, silenceIntervals = [], fillerOccurrences
             <YAxis hide />
             <Tooltip formatter={() => ["", ""]} labelFormatter={v => `t=${Number(v).toFixed(2)}s`} />
             {silenceIntervals.map((iv, i) => (
-              <ReferenceArea key={i} x1={iv.start_sec} x2={iv.end_sec} fill={areaFill} />
+              <ReferenceArea key={`sil-${i}`} x1={iv.start_sec} x2={iv.end_sec} fill={areaFill} />
             ))}
             {fillerOccurrences.map((f, i) => (
-              <ReferenceDot key={i} x={f.time_sec} y={0} r={5}
+              <ReferenceDot key={`fil-${i}`} x={f.time_sec} y={0} r={5}
                 label={{ value: f.word, position: "top", fontSize: 11, fill: COLOR_SECONDARY }}
                 fill={COLOR_SECONDARY}
                 stroke={COLOR_SECONDARY}
@@ -891,7 +1001,8 @@ function MFCCOverall({ segments, audioRef, height = 220 }) {
 
   const domain = React.useMemo(() => {
     if (!data.length) return [0, 1];
-    const vals = data.map(d => d.mean);
+    const vals = data.map(d => d.mean).filter(Number.isFinite);
+    if (!vals.length) return [0, 1];
     const lo = Math.min(...vals), hi = Math.max(...vals);
     const pad = (hi - lo) * 0.1 || 1;
     return [Math.floor(lo - pad), Math.ceil(hi + pad)];

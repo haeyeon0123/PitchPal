@@ -17,6 +17,9 @@ from model.content.core.spell_checker import run_spellcheck_and_analysis
 from model.speech.core.speech_analysis import analyze_speech
 from model.evaluation.evaluation_model import SpeechEvaluator
 
+# 점수 예측용
+import pandas as pd
+
 # -----------------------------------------------------
 # FastAPI 기본 설정
 # -----------------------------------------------------
@@ -42,9 +45,7 @@ SPEECH_RESULT_ROOT = Path("model") / "speech" / "results"
 SPEECH_TMP_ROOT.mkdir(parents=True, exist_ok=True)
 SPEECH_RESULT_ROOT.mkdir(parents=True, exist_ok=True)
 
-# 정적 파일 서빙 (프론트에서 바로 열람)
-#   - 기존 호환: /static → content 결과
-#   - 신규 음성 결과: /static-speech → speech 결과
+# 정적 파일 서빙
 app.mount("/static",        StaticFiles(directory=str(CONTENT_RESULT_ROOT)), name="static")
 app.mount("/static-speech", StaticFiles(directory=str(SPEECH_RESULT_ROOT)),  name="static-speech")
 
@@ -55,7 +56,6 @@ class EvaluateBody(BaseModel):
     features: Dict[str, Any]
 
 def load_json_file(file_name: str) -> Optional[dict]:
-    """결과 JSON 파일 읽기 (내용분석용 경로에서)"""
     p = CONTENT_RESULT_ROOT / file_name
     if not p.exists():
         return None
@@ -65,10 +65,6 @@ def load_json_file(file_name: str) -> Optional[dict]:
         return None
 
 def get_in(d: dict, paths: List[List[str]]) -> Optional[Any]:
-    """
-    중첩된 키를 안전하게 탐색.
-    paths: [["a","b","c"], ["x","y"]] 처럼 여러 후보 경로 중 먼저 성공하는 값을 반환
-    """
     if not isinstance(d, dict):
         return None
     for path in paths:
@@ -85,18 +81,12 @@ def get_in(d: dict, paths: List[List[str]]) -> Optional[Any]:
     return None
 
 def build_content_response(payload: Optional[dict] = None) -> Dict[str, Any]:
-    """
-    CONTENT_RESULT_ROOT 내 생성된 파일들을 읽어 응답 형태를 표준화.
-    기존 /content/run 과 진행률 방식 결과 조회에서 공통 사용.
-    """
-    # 결과 JSON 후보들 중 첫 번째로 존재하는 파일 사용
     data = None
     for cand in [
         "corrected_result.json",
         "corrected.json",
         "result.json",
         "content_result.json",
-        "content_analysis.json",
     ]:
         data = load_json_file(cand)
         if data:
@@ -111,7 +101,7 @@ def build_content_response(payload: Optional[dict] = None) -> Dict[str, Any]:
 
     corrected_text = get_in(data, [
         ["spell_check", "corrected_text"],
-        ["content_feedback", "content_feedback", "corrected_text"],  # 일부 팀 구조
+        ["content_feedback", "content_feedback", "corrected_text"],
         ["corrected_text"]
     ])
 
@@ -121,12 +111,11 @@ def build_content_response(payload: Optional[dict] = None) -> Dict[str, Any]:
     ])
 
     feedback_text = get_in(data, [
-        ["content_feedback", "content_feedback", "feedback_text"],  # 일부 팀 구조
+        ["content_feedback", "content_feedback", "feedback_text"],
         ["content_feedback", "feedback_text"],
         ["feedback_text"], ["analysis"], ["comment"]
     ])
 
-    # HTML 파일 링크 (/static 마운트 기준)
     html_path = CONTENT_RESULT_ROOT / "corrected_result.html"
     if not html_path.exists():
         for alt in ["corrected.html", "result.html", "content_result.html"]:
@@ -157,8 +146,17 @@ class Segment(BaseModel):
     has_filler: Optional[bool] = None
     is_pause: Optional[bool] = None
 
+class SilenceIv(BaseModel):
+    start: float
+    end: float
+
+class FillerHit(BaseModel):
+    token: str
+    time: Optional[float] = None
+    end: Optional[float] = None
+
 class SpeechAnalysisResponse(BaseModel):
-    pronunciation_accuracy: float          # 0~1
+    pronunciation_accuracy: float          # 0~1 (백엔드에서 0~100일 경우 나눠서 넣음)
     wpm: float
     pitch_mean: float
     pitch_std: float
@@ -166,31 +164,24 @@ class SpeechAnalysisResponse(BaseModel):
     filler_count: int
     mfcc_mean: List[float] = Field(default_factory=list)
     mfcc_std: List[float]  = Field(default_factory=list)
-    scores: Dict[str, float] = Field(default_factory=dict)  # {"speed":7.5, "intonation":6.8, ...}
+    scores: Dict[str, float] = Field(default_factory=dict)  # {"speed":(0~5), "intonation":(0~5), ...}
     segments: List[Segment]   = Field(default_factory=list) # 5초 단위 등
+    # 옵션 B용 전역 타임라인
+    silence: List[SilenceIv]  = Field(default_factory=list)
+    fillers: List[FillerHit]  = Field(default_factory=list)
     feedback_text: str = ""
-    stt_results_url: Optional[str] = None  # 프론트 "발음 분석 결과" 링크
-    analysis_mode: str = "audio+script"    # or "audio_only"
+    stt_results_url: Optional[str] = None  # 프론트가 stt_result_url/stt_results_url 둘 다 체크
+    analysis_mode: str = "audio+script"
 
 # -----------------------------------------------------
 # 기존 엔드포인트 (내용분석)
 # -----------------------------------------------------
 @app.post("/content/run")
 async def content_run(script: str = Form(...)):
-    """
-    1) script 저장 → 2) 내부 분석 실행(HTML/JSON 파일 생성) → 3) 저장된 JSON을 읽어서 응답 구성
-    """
-    # 1) 요청 받은 script를 임시 파일로 저장
     tmp_txt = CONTENT_RESULT_ROOT / f"script_{uuid.uuid4().hex}.txt"
     tmp_txt.write_text(script, encoding="utf-8")
-
-    # 2) 교정/분석 실행 (내부에서 corrected_result.html/json 등을 CONTENT_RESULT_ROOT에 저장)
     payload = run_spellcheck_and_analysis(str(tmp_txt))
-
-    # 3) 결과 조립(파일 시스템에서 읽음)
     return build_content_response(payload)
-
-# (참고) 기존 임시 음성 엔드포인트는 유지하지 않고 /speech/analyze로 표준화
 
 @app.post("/evaluate")
 async def evaluate(body: EvaluateBody):
@@ -225,10 +216,7 @@ async def get_corrected_result():
     return JSONResponse(content=data)
 
 # -----------------------------------------------------
-# [NEW] 음성분석 표준 엔드포인트
-#   - 프론트: FormData 키 이름을 audio, script 로 보냄
-#   - 둘 다 업로드된 경우를 기본으로 (요구사항 반영)
-#   - STT 결과 HTML은 /static-speech 경로로 열람
+# 업로드 저장/세그먼트 파싱 유틸
 # -----------------------------------------------------
 def _save_upload_to_tmp(upload: UploadFile, target_dir: Path, fallback_suffix: str) -> Path:
     ext = Path(upload.filename).suffix or fallback_suffix
@@ -238,8 +226,7 @@ def _save_upload_to_tmp(upload: UploadFile, target_dir: Path, fallback_suffix: s
     return out_path
 
 def _fallback_speech_result(audio_path: Path, script_path: Optional[Path]) -> SpeechAnalysisResponse:
-    """팀 함수 준비 전에도 프론트 개발 가능하도록 하는 더미 결과"""
-    stt_url = "/static-speech/stt_results.html"  # 프론트에서 API_BASE + stt_url 로 열람
+    stt_url = "/static-speech/stt_results.html"
     return SpeechAnalysisResponse(
         pronunciation_accuracy=0.82,
         wpm=126.0,
@@ -249,7 +236,7 @@ def _fallback_speech_result(audio_path: Path, script_path: Optional[Path]) -> Sp
         filler_count=6,
         mfcc_mean=[0.1]*13,
         mfcc_std=[0.05]*13,
-        scores={"speed":7.5, "intonation":6.3, "pronunciation":8.1, "filler":6.5, "pause":7.0},
+        scores={"speed":7.5/2, "intonation":6.3/2, "pronunciation":8.1/2, "filler":6.5/2, "pause":7.0/2, "mfcc":7.8/2},
         segments=[
             Segment(start_sec=0, end_sec=5,  wpm=120, pitch_mean=180, pitch_std=20, has_filler=False, is_pause=False),
             Segment(start_sec=5, end_sec=10, wpm=132, pitch_mean=190, pitch_std=24, has_filler=True,  is_pause=False),
@@ -258,19 +245,15 @@ def _fallback_speech_result(audio_path: Path, script_path: Optional[Path]) -> Sp
         feedback_text="🔶 발음은 괜찮습니다. 억양/간투사/속도 밸런스를 조금만 더 다듬어보세요.",
         stt_results_url=stt_url,
         analysis_mode="audio+script" if script_path else "audio_only",
+        silence=[],
+        fillers=[]
     )
 
-# --- segments 유연 파싱 유틸 ---
 def _parse_time_range_to_secs(tr: Any) -> Optional[Tuple[float, float]]:
-    """
-    '00:00-00:05' / '0-5' / [0,5] → (start, end) 초 단위로 변환
-    """
     try:
-        # 리스트/튜플 [s, e]
         if isinstance(tr, (list, tuple)) and len(tr) == 2:
             s, e = float(tr[0]), float(tr[1])
             return (min(s, e), max(s, e))
-        # 문자열 "mm:ss-mm:ss" or "s-e"
         tr = str(tr)
         if "-" in tr or "~" in tr:
             a, b = (tr.replace("~", "-")).split("-", 1)
@@ -287,12 +270,6 @@ def _parse_time_range_to_secs(tr: Any) -> Optional[Tuple[float, float]]:
     return None
 
 def _coerce_segment_dict(d: Dict[str, Any]) -> Segment:
-    """
-    다양한 입력 키를 표준 Segment로 강제 변환.
-    - start_sec/end_sec 있으면 그대로 사용
-    - 없고 time_range만 있으면 파싱
-    - 실패하면 0~5초 기본값
-    """
     if "start_sec" in d and "end_sec" in d:
         return Segment(**{
             "start_sec": float(d["start_sec"]),
@@ -316,9 +293,11 @@ def _coerce_segment_dict(d: Dict[str, Any]) -> Segment:
                 "has_filler": d.get("has_filler"),
                 "is_pause": d.get("is_pause"),
             })
-    # 마지막 안전장치
     return Segment(start_sec=0.0, end_sec=5.0)
 
+# -----------------------------------------------------
+# [NEW] 음성분석 표준 엔드포인트
+# -----------------------------------------------------
 @app.post("/speech/analyze", response_model=SpeechAnalysisResponse)
 async def speech_analyze(
     audio: UploadFile = File(..., description="음성 파일(.wav/.mp3 등)"),
@@ -327,54 +306,135 @@ async def speech_analyze(
     if not audio.filename or not script.filename:
         raise HTTPException(status_code=400, detail="audio, script 파일이 모두 필요합니다.")
 
-    # 1) 업로드 저장 (임시)
     audio_path  = _save_upload_to_tmp(audio,  SPEECH_TMP_ROOT, ".wav")
     script_path = _save_upload_to_tmp(script, SPEECH_TMP_ROOT, ".txt")
 
     try:
-        # 2) 실제 팀 분석 함수 호출 → 표준 스키마로 매핑
+        # 1) 팀 분석 함수 호출
         try:
             result: Dict[str, Any] = analyze_speech(
                 audio_path=str(audio_path),
                 script_path=str(script_path),
             )
-            # STT 결과 HTML이 팀 코드에서 생성된다면, SPEECH_RESULT_ROOT 하위로 저장하도록 팀 코드 맞춰주세요.
         except Exception:
-            # 팀 함수 호출이 어려우면 더미로 응답 (프론트 개발 연속성 보장)
             return _fallback_speech_result(audio_path, script_path)
 
-        # 3) 표준 응답 변환(키 없으면 기본값)
-        stt_url = result.get("stt_results_url")
-        # 상대경로로 제공되지 않았다면 기본 경로로 보정
+        # 2) STT 결과 HTML 경로 보정
+        stt_url = result.get("stt_result_url") or result.get("stt_results_url")
         if stt_url and not str(stt_url).startswith("/"):
             stt_url = f"/static-speech/{stt_url}"
         if not stt_url:
-            # 기본 파일명 가정(팀 코드에서 해당 파일을 SPEECH_RESULT_ROOT에 생성하도록 맞춰주세요)
             candidate = SPEECH_RESULT_ROOT / "stt_results.html"
             stt_url = f"/static-speech/{candidate.name}" if candidate.exists() else None
 
+        # 3) 세그먼트 정규화
         segments_raw = result.get("segments", [])
         segments_norm: List[Segment] = []
         for seg in segments_raw:
             if isinstance(seg, dict):
+                tr = seg.get("time_range")
+                if tr and "start_sec" not in seg:
+                    se = _parse_time_range_to_secs(tr)
+                    if se:
+                        seg = {**seg, "start_sec": se[0], "end_sec": se[1]}
                 segments_norm.append(_coerce_segment_dict(seg))
             else:
                 segments_norm.append(Segment(start_sec=0.0, end_sec=5.0))
 
+        # 4) 전역 침묵/간투사 취합 (옵션 B)
+        # - silence_intervals_in_segment()는 세그먼트 상대시간 → 전역 오프로 보정
+        global_silence: List[SilenceIv] = []
+        for seg in segments_raw:
+            tr = seg.get("time_range")
+            se = _parse_time_range_to_secs(tr) if tr else None
+            if not se:
+                continue
+            seg_start = se[0]
+            for iv in seg.get("silence", []) or []:
+                try:
+                    s, e = float(iv[0]), float(iv[1])
+                    global_silence.append(SilenceIv(start=seg_start + s, end=seg_start + e))
+                except Exception:
+                    continue
+
+        # - fillers는 word, start, end가 절대시간으로 들어와 있으므로 중앙값 기준으로 time 생성
+        global_fillers: List[FillerHit] = []
+        for seg in segments_raw:
+            for f in seg.get("fillers", []) or []:
+                try:
+                    token, s, e = f[0], float(f[1]), float(f[2])
+                    t = (s + e) / 2.0
+                    global_fillers.append(FillerHit(token=str(token), time=t, end=e))
+                except Exception:
+                    continue
+
+        # 5) 개선 제안 텍스트(팀 코드 출력 규칙을 백엔드에서 재현)
+        #   - speech_analysis.py는 "발음 유사도 점수"를 0~100으로 반환
+        acc_pct = float(result.get("발음 유사도 점수", result.get("pronunciation_accuracy", 0.0)))
+        acc_01 = acc_pct / 100.0 if acc_pct > 1.0 else float(result.get("pronunciation_accuracy", 0.0))
+        avg_pitch_mean = float(result.get("Pitch 평균", result.get("pitch_mean", 0.0)))
+        avg_wpm = float(result.get("wpm", 0.0))
+        filler_count = int(result.get("간투사 수", result.get("filler_count", 0)))
+
+        if acc_01 > 0.8 and avg_pitch_mean > 70 and avg_wpm > 100 and filler_count < 5:
+            feedback_text = "✅ 발음, 억양, 속도 모두 잘 조화되어 있습니다! 발표가 자연스럽습니다."
+        elif acc_01 > 0.6:
+            feedback_text = "🔶 발음은 괜찮습니다. 억양 또는 추임새, 속도에 조금 더 주의해주세요."
+        else:
+            feedback_text = "❌ 발음과 억양, 속도 전반에 개선이 필요합니다. 꾸준한 연습이 도움이 됩니다."
+
+        # 6) 모델 점수 예측 → 프론트 스케일(0~5)로 변환
+        features_df = pd.DataFrame([{
+            # 모델 학습 스키마와 동일하게 맞추세요.
+            "발음 유사도 점수": acc_pct if acc_pct > 1.0 else (acc_01 * 100.0),
+            "MFCC 평균": (result.get("MFCC 평균") or [0]*13)[0],
+            "MFCC 표준편차": (result.get("MFCC 표준편차") or [0]*13)[0],
+            "Pitch 평균 (Hz)": float(result.get("Pitch 평균", result.get("pitch_mean", 0.0))),
+            "Pitch 표준편차 (Hz)": float(result.get("Pitch 표준편차", result.get("pitch_std", 0.0))),
+            "WPM (Words Per Minute)": float(result.get("wpm", 0.0)),
+            "무음 구간 비율": float(result.get("무음 구간 비율", result.get("pause_ratio", 0.0))),
+            "간투사 수": int(result.get("간투사 수", result.get("filler_count", 0))),
+        }])
+
+        try:
+            evaluator = SpeechEvaluator()
+            evaluator.load_model()
+            predicted_df, _cluster_id = evaluator.predict(features_df)
+
+            scores_0_5: Dict[str, float] = {}
+            if not predicted_df.empty:
+                row = predicted_df.iloc[0].to_dict()
+                def half(name):  # 0~10 → 0~5
+                    return float(row.get(name, 0)) / 2.0
+                scores_0_5 = {
+                    "pronunciation": half("발음 정확도"),
+                    "speed":         half("발화 속도"),
+                    "intonation":    half("억양"),
+                    "pause":         half("휴지"),
+                    "filler":        half("간투사"),
+                    "mfcc":          half("매끄러움"),
+                }
+        except Exception:
+            # 모델이 없어도 서비스는 동작하도록 빈 점수 허용
+            scores_0_5 = {}
+
+        # 7) 응답 조립
         resp = SpeechAnalysisResponse(
-            pronunciation_accuracy=float(result.get("pronunciation_accuracy", 0.0)),
-            wpm=float(result.get("wpm", 0.0)),
-            pitch_mean=float(result.get("pitch_mean", 0.0)),
-            pitch_std=float(result.get("pitch_std", 0.0)),
-            pause_ratio=float(result.get("pause_ratio", 0.0)),
-            filler_count=int(result.get("filler_count", 0)),
-            mfcc_mean=list(result.get("mfcc_mean", []))[:13],
-            mfcc_std=list(result.get("mfcc_std", []))[:13],
-            scores=result.get("scores", {}),
+            pronunciation_accuracy=acc_01,
+            wpm=avg_wpm,
+            pitch_mean=float(result.get("Pitch 평균", result.get("pitch_mean", 0.0))),
+            pitch_std=float(result.get("Pitch 표준편차", result.get("pitch_std", 0.0))),
+            pause_ratio=float(result.get("무음 구간 비율", result.get("pause_ratio", 0.0))),
+            filler_count=filler_count,
+            mfcc_mean=list(result.get("MFCC 평균", []))[:13],
+            mfcc_std=list(result.get("MFCC 표준편차", []))[:13],
+            scores=scores_0_5,
             segments=segments_norm,
-            feedback_text=result.get("feedback_text", ""),
+            feedback_text=feedback_text,
             stt_results_url=stt_url,
             analysis_mode="audio+script",
+            silence=global_silence,
+            fillers=global_fillers
         )
         return resp
 
@@ -382,7 +442,7 @@ async def speech_analyze(
         raise HTTPException(status_code=500, detail=f"분석 중 오류: {e}")
 
     finally:
-        # 4) 임시파일 정리 (원하면 주석처리로 보존 가능)
+        # 임시파일 정리
         try:
             if audio_path.exists():  audio_path.unlink()
             if script_path.exists(): script_path.unlink()
@@ -392,8 +452,7 @@ async def speech_analyze(
 # -----------------------------------------------------
 # [NEW] 내용분석 진행률 방식 (기존 코드 유지)
 # -----------------------------------------------------
-# 메모리 저장(데모). 운영에선 Redis 등 외부 스토리지 권장.
-JOBS: Dict[str, Dict[str, Any]] = {}  # {job_id: {"progress": int, "status": str, "message": str, "result": Optional[dict]}}
+JOBS: Dict[str, Dict[str, Any]] = {}
 
 def _set_progress(job_id: str, value: int, message: str = ""):
     job = JOBS.get(job_id)
@@ -412,10 +471,6 @@ def _set_status(job_id: str, status: str, message: str = ""):
         job["message"] = message
 
 async def _ticker(job_id: str, until: int = 90, step_ms: int = 300):
-    """
-    내부 분석 함수가 콜백을 지원하지 않아도 UX 상 진행률이 천천히 오르게 하는 보조 태스크.
-    최종 완료 시 100%로 덮어쓰기 때문에 안전.
-    """
     try:
         while True:
             await asyncio.sleep(step_ms / 1000)
@@ -428,36 +483,25 @@ async def _ticker(job_id: str, until: int = 90, step_ms: int = 300):
             if cur < until:
                 _set_progress(job_id, cur + 1)
             else:
-                # until 도달 시 속도 완만히 유지
                 await asyncio.sleep(0.6)
     except Exception:
         pass
 
 async def _run_content_pipeline(job_id: str, script: str):
-    """
-    실제 내용 분석 파이프라인(비동기).
-    - 가능하면 run_spellcheck_and_analysis 내부 단계를 수정해 중간중간 _set_progress 호출하도록 개선하면 '진짜 진행률'이 됩니다.
-    - 여기서는 파일 저장 → 분석 호출 → 결과 조립 흐름을 유지합니다.
-    """
     try:
         _set_status(job_id, "running", "작업 시작")
         _set_progress(job_id, 5, "입력 파싱")
-
-        # UX 보조: 천천히 오르는 진행률
         ticker_task = asyncio.create_task(_ticker(job_id, until=90, step_ms=300))
 
-        # (기존 /content/run 과 동일하게) 텍스트를 임시 파일로 저장 후 함수 호출
         _set_progress(job_id, 10, "분석 준비")
         tmp_txt = CONTENT_RESULT_ROOT / f"script_{uuid.uuid4().hex}.txt"
         tmp_txt.write_text(script, encoding="utf-8")
 
         _set_progress(job_id, 20, "맞춤법/교정 분석")
-        # 동기 함수 → 스레드 풀에서 실행
         loop = asyncio.get_running_loop()
         payload = await loop.run_in_executor(None, lambda: run_spellcheck_and_analysis(str(tmp_txt)))
 
         _set_progress(job_id, 90, "결과 정리")
-        # 파일 시스템에서 결과를 조립하여 result 구성
         result = build_content_response(payload)
         JOBS[job_id]["result"] = result
 
@@ -469,7 +513,6 @@ async def _run_content_pipeline(job_id: str, script: str):
         _set_progress(job_id, 100)
         JOBS[job_id]["result"] = None
     finally:
-        # 보조 ticker 종료
         try:
             ticker_task.cancel()
         except Exception:
@@ -480,9 +523,6 @@ class StartBody(BaseModel):
 
 @app.post("/content/start")
 async def content_start(body: StartBody, background_tasks: BackgroundTasks):
-    """
-    (1) 진행률 방식 시작점: job_id 발급 후 백그라운드에서 파이프라인 실행
-    """
     if not body.script or not body.script.strip():
         raise HTTPException(status_code=400, detail="script가 비어 있습니다.")
     job_id = uuid.uuid4().hex
@@ -492,10 +532,6 @@ async def content_start(body: StartBody, background_tasks: BackgroundTasks):
 
 @app.get("/content/progress/{job_id}")
 async def content_progress(job_id: str):
-    """
-    (2) 진행률 조회: {progress, status, message}
-        status: queued | running | done | error
-    """
     job = JOBS.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="job_id 없음")
@@ -508,18 +544,13 @@ async def content_progress(job_id: str):
 
 @app.get("/content/result/{job_id}")
 async def content_result(job_id: str):
-    """
-    (3) 최종 결과 조회: 완료 시 표준 응답(dict) 반환
-    """
     job = JOBS.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="job_id 없음")
     if job["status"] != "done" or not job["result"]:
-        # 202: 아직 처리 중
         raise HTTPException(status_code=202, detail="아직 처리 중이거나 결과가 없습니다.")
     return job["result"]
 
-# (옵션) 헬스체크
 @app.get("/health")
 async def health():
     return {"status": "ok"}
