@@ -41,7 +41,7 @@ def gpt_spell_check(text: str) -> str:
         from openai import OpenAI  # 지연 임포트
         client = OpenAI(api_key=api_key)
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-3.5-turbo",
             messages=[
                 {"role": "user", "content": f"다음 문장의 맞춤법과 문장을 자연스럽게 고쳐 주세요:\n\n{text}"}
             ],
