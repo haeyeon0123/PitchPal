@@ -474,7 +474,7 @@ function ResultSection({ result, audioUrl, audioRef, onReplay, onReload, radarDa
               <div className="text-xs flex items-start gap-2 rounded-md bg-gray-50 p-3 border border-gray-100">
                 <Lightbulb className="w-4 h-4" style={{ color: COLOR_SECONDARY }} />
                 <span className="leading-5 text-gray-700">
-                  그래프에서 성과가 좋았던 구간을 반복 청취하고, 점수가 낮은 항목을 개선 목표로 삼아 다음 녹음에서 실험해 보세요.
+                  그래프에서 성과가 좋았던 구간을 반복 청취하고, 점수가 낮은 항목(예: 속도/억양)을 개선 목표로 삼아 다음 녹음에서 실험해 보세요.
                 </span>
               </div>
             </ElevCard>
