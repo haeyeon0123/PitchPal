@@ -5,7 +5,7 @@ import {
   Radar, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis,
   ResponsiveContainer,
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
-  ReferenceArea, ReferenceDot, ReferenceLine,
+  ReferenceArea, /* ReferenceDot 제거 */ ReferenceLine,
   BarChart, Bar,
   AreaChart, Area,
 } from 'recharts';
@@ -101,6 +101,60 @@ function SectionHeader({ number = "①", title, hint }) {
       </div>
       {hint && <span className="inline-flex items-center gap-1 text-xs text-gray-500">ⓘ {hint}</span>}
     </header>
+  );
+}
+
+/* ==== NEW: 침묵/간투사 카드 ==== */
+function SilenceCard({ ratioPercent = 0 }) {
+  const pct = Math.max(0, Math.min(100, Number(ratioPercent)));
+  return (
+    <div className="p-4 rounded-2xl bg-white shadow-sm border border-gray-100">
+      <div className="flex items-center justify-between mb-2">
+        <h5 className="font-semibold">침묵 비율</h5>
+        <span className="text-xs px-2 py-0.5 rounded-full bg-gray-50 text-gray-500 border border-gray-200">Silence</span>
+      </div>
+      <div className="flex items-baseline gap-2">
+        <span className="text-3xl font-bold" style={{ color: COLOR_PRIMARY }}>
+          {pct.toFixed(1)}%
+        </span>
+        <span className="text-sm text-gray-500">전체 발화 중</span>
+      </div>
+      <div className="mt-3 h-2 w-full bg-gray-100 rounded-full overflow-hidden" aria-hidden>
+        <div className="h-full rounded-full" style={{ width: `${pct}%`, backgroundColor: COLOR_PRIMARY }} />
+      </div>
+      <p className="mt-2 text-xs text-gray-600">
+        {pct < 8 ? '침묵이 적절합니다.' : pct < 15 ? '침묵이 다소 많아요.' : '침묵이 높은 편입니다.'}
+      </p>
+    </div>
+  );
+}
+
+function FillerCard({ items = [] }) {
+  const total = items.reduce((s, it) => s + Number(it.count || 0), 0);
+  return (
+    <div className="p-4 rounded-2xl bg-white shadow-sm border border-gray-100">
+      <div className="flex items-center justify-between mb-2">
+        <h5 className="font-semibold">간투사 사용</h5>
+        <span className="text-xs px-2 py-0.5 rounded-full bg-gray-50 text-gray-500 border border-gray-200">Fillers</span>
+      </div>
+      <div className="flex items-end gap-2 mb-2">
+        <span className="text-3xl font-bold" style={{ color: COLOR_SECONDARY }}>{total}</span>
+        <span className="text-sm text-gray-500">총 사용</span>
+      </div>
+      {items.length ? (
+        <ul className="divide-y divide-gray-100">
+          {items.map((it, i) => (
+            <li key={`${it.word}-${i}`} className="py-1.5 text-sm flex justify-between">
+              <span className="text-gray-700">{it.word}</span>
+              <span className="font-medium" style={{ color: COLOR_SECONDARY }}>{it.count}회</span>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <div className="text-sm text-gray-500">간투사 없음 🎉</div>
+      )}
+      <p className="mt-2 text-xs text-gray-600">간투사를 줄이면 메시지가 더 명확해져요.</p>
+    </div>
   );
 }
 
@@ -612,6 +666,21 @@ function ChartsBlock({ result, audioRef }) {
     return list.length ? list : DUMMY_SILENCE;
   }, [result, segments]);
 
+  // (추가) 침묵 카드용: 백엔드가 주는 무음 비율(0~1)을 %
+  const pauseRatioPct = Number((result?.features?.pause_ratio ?? 0) * 100);
+
+  // (추가) 간투사 카드용: 단어별 횟수 집계 (상위 6개)
+  const fillerItems = React.useMemo(() => {
+    const m = new Map();
+    (fillerOccurrences || []).forEach(f => {
+      const w = String(f.word ?? '기타');
+      m.set(w, (m.get(w) || 0) + 1);
+    });
+    return Array.from(m, ([word, count]) => ({ word, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 6);
+  }, [fillerOccurrences]);
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-end">
@@ -634,22 +703,21 @@ function ChartsBlock({ result, audioRef }) {
           <WPMBarMini segments={segments} audioRef={audioRef} />
           <PitchAreaMini segments={segments} audioRef={audioRef} />
           <MFCCSparkMini segments={segments} audioRef={audioRef} />
-          <TimelineStripMini
-            segments={segments}
-            fillerOccurrences={fillerOccurrences}
-            silenceIntervals={silenceIntervals}
-          />
+          {/* 침묵/간투사 스트립 → 카드로 교체 */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+            <SilenceCard ratioPercent={pauseRatioPct} />
+            <FillerCard items={fillerItems} />
+          </div>
         </div>
       ) : (
         <div className="space-y-8">
           <WPMChart segments={segments} band={[110, 160]} audioRef={audioRef} height={220} />
           <PitchChart segments={segments} bandScale={0.2} audioRef={audioRef} height={220} />
-          <TimelineWithFiller
-            segments={segments}
-            fillerOccurrences={fillerOccurrences}
-            silenceIntervals={silenceIntervals}
-            height={160}
-          />
+          {/* TimelineWithFiller → 카드로 교체 */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+            <SilenceCard ratioPercent={pauseRatioPct} />
+            <FillerCard items={fillerItems} />
+          </div>
           <MFCCOverall segments={segments} audioRef={audioRef} height={220} />
         </div>
       )}
@@ -763,49 +831,6 @@ function MFCCSparkMini({ segments, audioRef }) {
             <Tooltip labelFormatter={v=>`t=${Number(v).toFixed(2)}s`} formatter={(v)=>[v.toFixed?.(2), "음색(평균)"]}/>
             <Legend wrapperStyle={{ display: 'none' }}/>
             <Line type="monotone" dataKey="mean" dot={false} strokeWidth={1.8} stroke={COLOR_PRIMARY}/>
-          </LineChart>
-        </ResponsiveContainer>
-      </div>
-    </section>
-  );
-}
-
-function TimelineStripMini({ segments, silenceIntervals = [], fillerOccurrences = [] }) {
-  const data = React.useMemo(
-    () => (segments || []).map((s, i) => ({ t: midSec(s.time_range, i), y: 0, idx: i })),
-    [segments]
-  );
-
-  const areaFill = 'rgba(86,134,196,0.15)'; // COLOR_PRIMARY with opacity
-
-  return (
-    <section>
-      <div className="flex items-center justify-between mb-1">
-        <h5 className="font-semibold">침묵/간투사 스트립</h5>
-        <span className="text-xs text-gray-500">회색: 침묵 • 점: 간투사</span>
-      </div>
-      <div style={{ width: "100%", height: 180 }}>
-        <ResponsiveContainer>
-          <LineChart data={data} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
-            <CartesianGrid strokeDasharray="2 4" horizontal={false} vertical={false} strokeOpacity={0.2} />
-            <XAxis dataKey="t" tickFormatter={(v) => `${v.toFixed(0)}s`} fontSize={11} height={20}/>
-            <YAxis type="number" domain={[0, 1]} tick={false} axisLine={false} tickLine={false} />
-            <Tooltip formatter={() => ["", ""]} labelFormatter={(v) => `t=${Number(v).toFixed(2)}s`} />
-            <Line type="monotone" dataKey="y" dot={false} strokeOpacity={0} />
-            {silenceIntervals.map((iv, i) => (
-              <ReferenceArea key={`sil-${i}`} x1={iv.start_sec} x2={iv.end_sec} fill={areaFill} />
-            ))}
-            {fillerOccurrences.map((f, i) => (
-              <ReferenceDot
-                key={`fil-${i}`}
-                x={f.time_sec}
-                y={0}
-                r={4}
-                label={{ value: f.word, position: "top", fontSize: 11, fill: COLOR_SECONDARY }}
-                fill={COLOR_SECONDARY}
-                stroke={COLOR_SECONDARY}
-              />
-            ))}
           </LineChart>
         </ResponsiveContainer>
       </div>
@@ -932,40 +957,6 @@ function PitchChart({ segments, bandScale = 0.2, audioRef, height = 220 }) {
             <Legend verticalAlign="top" align="right" wrapperStyle={{ paddingBottom: 8 }} formatter={(key) => ({ pitch: "피치(평균)" }[key] || key)} />
             <ReferenceArea y1={bandMin} y2={bandMax} strokeOpacity={0} fill={bandFill} />
             <Line type="monotone" dataKey="pitch" dot={false} stroke={COLOR_PRIMARY} />
-          </LineChart>
-        </ResponsiveContainer>
-      </div>
-    </section>
-  );
-}
-
-function TimelineWithFiller({ segments, silenceIntervals = [], fillerOccurrences = [], height = 160 }) {
-  const data = React.useMemo(() => (segments || []).map((s, i) => ({
-    t: midSec(s.time_range, i), dummy: 0,
-  })), [segments]);
-
-  const areaFill = 'rgba(86,134,196,0.15)';
-
-  return (
-    <section>
-      <SectionTitle icon={<Slash />} title="침묵/발화 타임라인 & 간투사" hint="회색 블록은 침묵 구간, 점 라벨은 간투사 발생 지점입니다." />
-      <div style={{ width: "100%", height }}>
-        <ResponsiveContainer>
-          <LineChart data={data} margin={{ top: 12, right: 16, left: 0, bottom: 8 }}>
-            <CartesianGrid strokeDasharray="2 4" horizontal={false} strokeOpacity={0.4} />
-            <XAxis dataKey="t" tickFormatter={v => `${v.toFixed(0)}s`} />
-            <YAxis hide />
-            <Tooltip formatter={() => ["", ""]} labelFormatter={v => `t=${Number(v).toFixed(2)}s`} />
-            {silenceIntervals.map((iv, i) => (
-              <ReferenceArea key={`sil-${i}`} x1={iv.start_sec} x2={iv.end_sec} fill={areaFill} />
-            ))}
-            {fillerOccurrences.map((f, i) => (
-              <ReferenceDot key={`fil-${i}`} x={f.time_sec} y={0} r={5}
-                label={{ value: f.word, position: "top", fontSize: 11, fill: COLOR_SECONDARY }}
-                fill={COLOR_SECONDARY}
-                stroke={COLOR_SECONDARY}
-              />
-            ))}
           </LineChart>
         </ResponsiveContainer>
       </div>
