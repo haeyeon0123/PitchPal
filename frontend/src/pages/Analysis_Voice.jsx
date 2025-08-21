@@ -137,8 +137,9 @@ function FillerCard({ items = [] }) {
         <h5 className="font-semibold">간투사 사용</h5>
         <span className="text-xs px-2 py-0.5 rounded-full bg-gray-50 text-gray-500 border border-gray-200">Fillers</span>
       </div>
+      {/* 총 사용 숫자와 '회'를 같은 스타일로 통일 */}
       <div className="flex items-end gap-2 mb-2">
-        <span className="text-3xl font-bold" style={{ color: COLOR_SECONDARY }}>{total}</span>
+        <span className="text-3xl font-bold" style={{ color: COLOR_SECONDARY }}>{total}회</span>
         <span className="text-sm text-gray-500">총 사용</span>
       </div>
       {items.length ? (
@@ -251,12 +252,10 @@ function mapServiceToUi(api) {
       mfcc:          mfcc5,
     },
     features: { pronunciation_accuracy, wpm, filler_count, pause_ratio },
-    // ← speech_analysis.py의 "발표 평가 요약" 문구가 여기에 들어오도록 백엔드에서 feedback_text를 넣어주세요.
     feedback: api?.feedback_text || "분석 결과를 불러왔습니다. 상세 항목을 확인해 보세요.",
     feedback_bullets: Array.isArray(api?.feedback_bullets) ? api.feedback_bullets : [],
     stt_html_url: api?.stt_result_url || api?.stt_results_url || null,
     segments,
-    // 전역 타임라인 데이터(ChartsBlock에서 사용)
     _globalSilence: silence,
     _globalFillers: fillers,
   };
@@ -441,8 +440,7 @@ export default function AnalysisVoice() {
 function ResultSection({ result, audioUrl, audioRef, onReplay, onReload, radarData }) {
   const totalScore10 = Number(((Object.values(result.scores).reduce((a, b) => a + b, 0) / 6) * 2).toFixed(1));
 
-  // 백엔드가 주는 stt_results_url(예: "/model/speech/results/stt_results.html") 우선 사용
-  // 없으면 최신 결과 리다이렉트 엔드포인트로 폴백
+  // 백엔드가 주는 stt_results_url 우선, 없으면 최신 결과 엔드포인트
   const sttPath = result?.stt_html_url || '/speech/results/latest';
   const sttUrl = sttPath.startsWith('http')
     ? sttPath
@@ -524,7 +522,7 @@ function ResultSection({ result, audioUrl, audioRef, onReplay, onReload, radarDa
                 </div>
               </div>
 
-              {/* speech_analysis.py의 요약문구(피드백) 강조 노출 */}
+              {/* 피드백 */}
               {result?.feedback && (
                 <div className="mb-4 p-3 rounded-md border text-sm"
                      style={{ background: '#F6F5FF', borderColor: '#E7E4FF', color: '#4B3FA4' }}>
@@ -532,8 +530,6 @@ function ResultSection({ result, audioUrl, audioRef, onReplay, onReload, radarDa
                 </div>
               )}
 
-              {/* (요청) 간투사/무음/음색 항목은 제거 */}
-              {/* 필요 시 다른 맞춤 항목을 여기 추가 가능 */}
               <div className="text-xs flex items-start gap-2 rounded-md bg-gray-50 p-3 border border-gray-100">
                 <Lightbulb className="w-4 h-4" style={{ color: COLOR_SECONDARY }} />
                 <span className="leading-5 text-gray-700">
@@ -555,14 +551,13 @@ function ResultSection({ result, audioUrl, audioRef, onReplay, onReload, radarDa
           음성 재생
         </button>
 
-        {/* (요청) 경로 열기 */}
         <a
           href={sttUrl}
-           target="_blank"
-           rel="noopener noreferrer"
-           className="w-full sm:w-auto flex items-center justify-center gap-2 px-6 py-3 text-white font-semibold rounded-lg transition"
-           style={{ backgroundColor: COLOR_PRIMARY }}
-         >
+          target="_blank"
+          rel="noopener noreferrer"
+          className="w-full sm:w-auto flex items-center justify-center gap-2 px-6 py-3 text-white font-semibold rounded-lg transition"
+          style={{ backgroundColor: COLOR_PRIMARY }}
+        >
           <ExternalLink className="w-4 h-4 text-white" />
           <span>발음 분석 결과</span>
         </a>
@@ -603,11 +598,9 @@ function ChartsBlock({ result, audioRef }) {
 
   const segments = result?.segments?.length ? result.segments : DUMMY_SEGMENTS;
 
-  // 옵션 B: 전역이 비어있으면 '세그먼트 상대시간'을 '절대시간'으로 변환해서 사용
+  // 전역이 비어있으면 세그먼트 상대시간을 절대시간으로 보정
   const fillerOccurrences = React.useMemo(() => {
-    if (Array.isArray(result?._globalFillers) && result._globalFillers.length) {
-      return result._globalFillers;
-    }
+    if (Array.isArray(result?._globalFillers) && result._globalFillers.length) return result._globalFillers;
     const list = [];
     (segments || []).forEach((s) => {
       const { start: segStart } = parseTimeRange(s.time_range);
@@ -615,17 +608,13 @@ function ChartsBlock({ result, audioRef }) {
         let t = null, word = '어';
         if (Array.isArray(fv)) {
           const fs = Number(fv[1] ?? 0), fe = Number(fv[2] ?? fs);
-          // 상대초라면 segStart 더하기 — 현재는 절대초 가정
-          t = (fs + fe) / 2;
-          word = String(fv[0] ?? '어');
+          t = (fs + fe) / 2; word = String(fv[0] ?? '어');
         } else if (typeof fv === 'object') {
-          if ('time_sec' in fv || 'time' in fv) {
-            t = Number(fv.time_sec ?? fv.time);
-          } else if ('start_sec' in fv || 'end_sec' in fv) {
-            t = Number(((fv.start_sec ?? 0) + (fv.end_sec ?? 0)) / 2);
-          } else if ('start_rel' in fv || 'end_rel' in fv) {
+          if ('time_sec' in fv || 'time' in fv) t = Number(fv.time_sec ?? fv.time);
+          else if ('start_sec' in fv || 'end_sec' in fv) t = Number(((fv.start_sec ?? 0) + (fv.end_sec ?? 0)) / 2);
+          else if ('start_rel' in fv || 'end_rel' in fv) {
             const fs = Number(segStart + (fv.start_rel ?? 0));
-            const fe = Number(segStart + (fv.end_rel   ?? (fv.start_rel ?? 0)));
+            const fe = Number(segStart + (fv.end_rel ?? (fv.start_rel ?? 0)));
             t = (fs + fe) / 2;
           }
           word = String(fv.word ?? fv.token ?? '어');
@@ -637,39 +626,27 @@ function ChartsBlock({ result, audioRef }) {
   }, [result, segments]);
 
   const silenceIntervals = React.useMemo(() => {
-    if (Array.isArray(result?._globalSilence) && result._globalSilence.length) {
-      return result._globalSilence;
-    }
+    if (Array.isArray(result?._globalSilence) && result._globalSilence.length) return result._globalSilence;
     const list = [];
     (segments || []).forEach((s) => {
       const { start: segStart } = parseTimeRange(s.time_range);
       (s.silence || []).forEach((iv) => {
         let ss, ee;
-        if (Array.isArray(iv)) {
-          ss = Number(segStart + (iv[0] ?? 0));
-          ee = Number(segStart + (iv[1] ?? 0));
-        } else {
+        if (Array.isArray(iv)) { ss = Number(segStart + (iv[0] ?? 0)); ee = Number(segStart + (iv[1] ?? 0)); }
+        else {
           const sAbs = Number(iv.start_sec ?? iv.start ?? NaN);
           const eAbs = Number(iv.end_sec   ?? iv.end   ?? NaN);
-          if (Number.isFinite(sAbs) && Number.isFinite(eAbs)) {
-            ss = sAbs; ee = eAbs;
-          } else {
-            ss = Number(segStart + (iv.start_rel ?? 0));
-            ee = Number(segStart + (iv.end_rel   ?? 0));
-          }
+          if (Number.isFinite(sAbs) && Number.isFinite(eAbs)) { ss = sAbs; ee = eAbs; }
+          else { ss = Number(segStart + (iv.start_rel ?? 0)); ee = Number(segStart + (iv.end_rel ?? 0)); }
         }
-        if (Number.isFinite(ss) && Number.isFinite(ee)) {
-          list.push({ start_sec: ss, end_sec: ee });
-        }
+        if (Number.isFinite(ss) && Number.isFinite(ee)) list.push({ start_sec: ss, end_sec: ee });
       });
     });
     return list.length ? list : DUMMY_SILENCE;
   }, [result, segments]);
 
-  // (추가) 침묵 카드용: 백엔드가 주는 무음 비율(0~1)을 %
   const pauseRatioPct = Number((result?.features?.pause_ratio ?? 0) * 100);
 
-  // (추가) 간투사 카드용: 단어별 횟수 집계 (상위 6개)
   const fillerItems = React.useMemo(() => {
     const m = new Map();
     (fillerOccurrences || []).forEach(f => {
@@ -703,7 +680,6 @@ function ChartsBlock({ result, audioRef }) {
           <WPMBarMini segments={segments} audioRef={audioRef} />
           <PitchAreaMini segments={segments} audioRef={audioRef} />
           <MFCCSparkMini segments={segments} audioRef={audioRef} />
-          {/* 침묵/간투사 스트립 → 카드로 교체 */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
             <SilenceCard ratioPercent={pauseRatioPct} />
             <FillerCard items={fillerItems} />
@@ -713,12 +689,14 @@ function ChartsBlock({ result, audioRef }) {
         <div className="space-y-8">
           <WPMChart segments={segments} band={[110, 160]} audioRef={audioRef} height={220} />
           <PitchChart segments={segments} bandScale={0.2} audioRef={audioRef} height={220} />
-          {/* TimelineWithFiller → 카드로 교체 */}
+
+          {/* 순서 변경: 음색(평균) → 침묵/간투사 카드 */}
+          <MFCCOverall segments={segments} audioRef={audioRef} height={220} />
+
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
             <SilenceCard ratioPercent={pauseRatioPct} />
             <FillerCard items={fillerItems} />
           </div>
-          <MFCCOverall segments={segments} audioRef={audioRef} height={220} />
         </div>
       )}
     </div>
