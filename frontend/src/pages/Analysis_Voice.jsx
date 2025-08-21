@@ -15,6 +15,8 @@ import {
 } from 'lucide-react';
 
 import { runSpeechAnalysis } from '../services/speechService';
+import { API_BASE } from '../config/apiEndpoints';
+
 
 // ====== 브랜드 컬러 ======
 const COLOR_PRIMARY   = '#5686C4';
@@ -385,6 +387,13 @@ export default function AnalysisVoice() {
 function ResultSection({ result, audioUrl, audioRef, onReplay, onReload, radarData }) {
   const totalScore10 = Number(((Object.values(result.scores).reduce((a, b) => a + b, 0) / 6) * 2).toFixed(1));
 
+  // 백엔드가 주는 stt_results_url(예: "/model/speech/results/stt_results.html") 우선 사용
+  // 없으면 최신 결과 리다이렉트 엔드포인트로 폴백
+  const sttPath = result?.stt_html_url || '/speech/results/latest';
+  const sttUrl = sttPath.startsWith('http')
+    ? sttPath
+    : `${API_BASE}${sttPath.startsWith('/') ? '' : '/'}${sttPath}`;
+
   return (
     <div className="space-y-10">
       {/* 오디오 */}
@@ -492,14 +501,14 @@ function ResultSection({ result, audioUrl, audioRef, onReplay, onReload, radarDa
           음성 재생
         </button>
 
-        {/* (요청) 고정 경로로 열기 */}
+        {/* (요청) 경로 열기 */}
         <a
-          href="model/speech/results/stt_results.html"
-          target="_blank"
-          rel="noopener noreferrer"
-          className="w-full sm:w-auto flex items-center justify-center gap-2 px-6 py-3 text-white font-semibold rounded-lg transition"
-          style={{ backgroundColor: COLOR_PRIMARY }}
-        >
+          href={sttUrl}
+           target="_blank"
+           rel="noopener noreferrer"
+           className="w-full sm:w-auto flex items-center justify-center gap-2 px-6 py-3 text-white font-semibold rounded-lg transition"
+           style={{ backgroundColor: COLOR_PRIMARY }}
+         >
           <ExternalLink className="w-4 h-4 text-white" />
           <span>발음 분석 결과</span>
         </a>

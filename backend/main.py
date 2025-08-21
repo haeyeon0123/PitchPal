@@ -1,7 +1,7 @@
 # backend/main.py
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from typing import Dict, Any, List, Optional, Tuple
@@ -40,8 +40,14 @@ SPEECH_TMP_ROOT.mkdir(parents=True, exist_ok=True)
 SPEECH_RESULT_ROOT.mkdir(parents=True, exist_ok=True)
 
 # 정적 파일 서빙
-app.mount("/static",        StaticFiles(directory=str(CONTENT_RESULT_ROOT)), name="static")
-app.mount("/static-speech", StaticFiles(directory=str(SPEECH_RESULT_ROOT)),  name="static-speech")
+# - 내용 분석 결과
+app.mount("/static", StaticFiles(directory=str(CONTENT_RESULT_ROOT)), name="static")
+
+# - 음성 분석 결과 (두 개의 alias 제공)
+#   1) /static-speech (기존 유지)
+#   2) /model/speech/results (프론트에서 그대로 열 수 있도록, 스샷 경로와 동일)
+app.mount("/static-speech", StaticFiles(directory=str(SPEECH_RESULT_ROOT)), name="static-speech")
+app.mount("/model/speech/results", StaticFiles(directory=str(SPEECH_RESULT_ROOT)), name="speech-results-alias")
 
 # -----------------------------------------------------
 # 공통 유틸
@@ -212,7 +218,8 @@ def _save_upload_to_tmp(upload: UploadFile, target_dir: Path, fallback_suffix: s
     return out_path
 
 def _fallback_speech_result(audio_path: Path, script_path: Optional[Path]) -> SpeechAnalysisResponse:
-    stt_url = "/static-speech/stt_results.html"
+    # alias 경로를 기본으로 안내 (/model/speech/results)
+    stt_url = "/model/speech/results/stt_results.html"
     return SpeechAnalysisResponse(
         pronunciation_accuracy=0.82,
         wpm=126.0,
@@ -328,11 +335,13 @@ async def speech_analyze(
 
         # STT HTML 경로 보정
         stt_url = raw.get("stt_result_url") or raw.get("stt_results_url")
-        if stt_url and not str(stt_url).startswith("/"):
-            stt_url = f"/static-speech/{Path(stt_url).name}"
-        if not stt_url:
+        if stt_url:
+            # 파일명만 들어오면 alias로 보정
+            name = Path(str(stt_url)).name
+            stt_url = f"/model/speech/results/{name}"
+        else:
             candidate = SPEECH_RESULT_ROOT / "stt_results.html"
-            stt_url = f"/static-speech/{candidate.name}" if candidate.exists() else None
+            stt_url = f"/model/speech/results/{candidate.name}" if candidate.exists() else None
 
         # 세그먼트 정규화 + 전역 이벤트(옵션 B)
         segments_norm: List[Segment] = []
@@ -358,7 +367,6 @@ async def speech_analyze(
                         pass
 
                 # per-seg silence: [(local_s, local_e)] → 절대초로 변환
-                # 주의: 우리 팀 함수는 silence_intervals_in_segment 를 그대로 넣어 local 구간일 수 있음
                 for iv in seg.get("silence", []) or []:
                     try:
                         ls, le = float(iv[0]), float(iv[1])
@@ -383,11 +391,10 @@ async def speech_analyze(
 
         # (선택) 점수 딕셔너리: 프론트가 레이더 0~10로 변환
         scores = {
-            # 간단 가중치 예시 — 필요하면 바꾸기
             "pronunciation": round(pron_acc * 10, 2),
             "speed": 7.0,
             "intonation": 6.0,
-            "filler": max(0.0, 10.0 - min(10.0, float(filler_count))),  # 적을수록 높게
+            "filler": max(0.0, 10.0 - min(10.0, float(filler_count))),
             "pause": max(0.0, 10.0 - round(pause_ratio * 10, 2)),
             "mfcc": 8.0,
         }
@@ -420,6 +427,22 @@ async def speech_analyze(
             if script_path.exists(): script_path.unlink()
         except Exception:
             pass
+
+# -----------------------------------------------------
+# 최신 STT 결과 리다이렉트 (선택)
+# -----------------------------------------------------
+@app.get("/speech/results/latest")
+def get_latest_speech_result():
+    htmls = sorted(
+        SPEECH_RESULT_ROOT.glob("*.html"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True
+    )
+    if not htmls:
+        raise HTTPException(status_code=404, detail="결과 HTML이 없습니다.")
+    latest = htmls[0].name
+    # 프론트가 그대로 열 수 있는 alias 경로로 리다이렉트
+    return RedirectResponse(url=f"/model/speech/results/{latest}", status_code=302)
 
 # -----------------------------------------------------
 # 내용분석 진행률 방식 (기존 유지)
