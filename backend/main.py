@@ -1,3 +1,4 @@
+나의 말:
 # backend/main.py
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -796,4 +797,4 @@ async def content_result(job_id: str):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    return {"status": "ok"} 
