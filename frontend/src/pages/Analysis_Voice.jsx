@@ -5,7 +5,7 @@ import {
   Radar, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis,
   ResponsiveContainer,
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
-  ReferenceArea, /* ReferenceDot 제거 */ ReferenceLine,
+  ReferenceArea, ReferenceLine,
   BarChart, Bar,
   AreaChart, Area,
 } from 'recharts';
@@ -16,7 +16,6 @@ import {
 
 import { runSpeechAnalysis } from '../services/speechService';
 import { API_BASE } from '../config/apiEndpoints';
-
 
 // ====== 브랜드 컬러 ======
 const COLOR_PRIMARY   = '#5686C4';
@@ -167,7 +166,14 @@ function mapServiceToUi(api) {
   const pronunciation_accuracy = Number(api?.pronunciation_accuracy ?? api?.발음_유사도_점수 ?? 0) / (api?.발음_유사도_점수 ? 100 : 1);
   const wpm = Number(api?.wpm ?? 0);
   const pause_ratio = Number(api?.pause_ratio ?? api?.무음_구간_비율 ?? 0);
-  const filler_count = Number(api?.filler_count ?? api?.간투사_수 ?? 0);
+
+  // ✅ 간투사 총합: api.filler.total 우선
+  const filler_count = Number(
+    (api?.filler && typeof api.filler.total !== 'undefined' ? api.filler.total : undefined)
+    ?? api?.filler_count
+    ?? api?.간투사_수
+    ?? 0
+  );
 
   // 1) 세그먼트 변환: {start_sec,end_sec} 혹은 {time_range}
   const segIn = Array.isArray(api?.segments) ? api.segments : [];
@@ -201,7 +207,7 @@ function mapServiceToUi(api) {
       })
     : DUMMY_SEGMENTS;
 
-  // 2) 전역 침묵/간투사 (없으면 아래 ChartsBlock에서 세그먼트 기반으로 보정)
+  // 2) 전역 침묵/간투사 (우선순위: api.filler.occurrences > api.fillers > 세그먼트 보정)
   const silence = Array.isArray(api?.silence) && api.silence.length
     ? api.silence.map(iv => ({
         start_sec: Number(iv.start ?? iv.start_sec ?? 0),
@@ -209,17 +215,39 @@ function mapServiceToUi(api) {
       }))
     : [];
 
-  const fillers = Array.isArray(api?.fillers) && api.fillers.length
-    ? api.fillers
-        .map(f => {
-          if (typeof f === 'object') {
-            const t = Number(f.time ?? f.time_sec ?? (Number.isFinite(f.start_sec) && Number.isFinite(f.end_sec) ? (f.start_sec + f.end_sec)/2 : NaN));
-            return Number.isFinite(t) ? { time_sec: t, word: f.token ?? f.word ?? 'F' } : null;
-          }
-          return null;
-        })
-        .filter(Boolean)
-    : [];
+  let fillers = [];
+  const occ = Array.isArray(api?.filler?.occurrences) ? api.filler.occurrences : null;
+  if (occ && occ.length) {
+    fillers = occ.map(o => {
+      if (Number.isFinite(o?.time)) {
+        return { time_sec: Number(o.time), word: String(o.type ?? o.word ?? 'F') };
+      }
+      const s = Number(o?.start), e = Number(o?.end);
+      if (Number.isFinite(s) && Number.isFinite(e)) {
+        return { time_sec: (s + e) / 2, word: String(o.type ?? o.word ?? 'F') };
+      }
+      return null;
+    }).filter(Boolean);
+  } else if (Array.isArray(api?.fillers) && api.fillers.length) {
+    fillers = api.fillers
+      .map(f => {
+        const t = Number(f.time ?? f.time_sec ?? (Number.isFinite(f.start_sec) && Number.isFinite(f.end_sec) ? (f.start_sec + f.end_sec)/2 : NaN));
+        return Number.isFinite(t) ? { time_sec: t, word: f.token ?? f.word ?? 'F' } : null;
+      })
+      .filter(Boolean);
+  }
+
+  // ✅ 유형별 집계: 있으면 그대로, 없으면 occurrences로 계산
+  let fillerByType = null;
+  if (api?.filler && api.filler.by_type && typeof api.filler.by_type === 'object') {
+    fillerByType = Object.entries(api.filler.by_type).map(([word, count]) => ({
+      word, count: Number(count || 0)
+    }));
+  } else if (fillers.length) {
+    const m = new Map();
+    fillers.forEach(f => m.set(f.word, (m.get(f.word) || 0) + 1));
+    fillerByType = Array.from(m, ([word, count]) => ({ word, count }));
+  }
 
   // 3) 레이더 차트용 점수(0~5) — 휴리스틱
   const pitchVals = pitchTL.map(p => Number(p.value)).filter(Number.isFinite);
@@ -251,13 +279,15 @@ function mapServiceToUi(api) {
       pause:         pause5,
       mfcc:          mfcc5,
     },
+    // ✅ KPI 카드가 filler_count(=filler.total)을 쓰도록
     features: { pronunciation_accuracy, wpm, filler_count, pause_ratio },
     feedback: api?.feedback_text || "분석 결과를 불러왔습니다. 상세 항목을 확인해 보세요.",
     feedback_bullets: Array.isArray(api?.feedback_bullets) ? api.feedback_bullets : [],
     stt_html_url: api?.stt_result_url || api?.stt_results_url || null,
     segments,
     _globalSilence: silence,
-    _globalFillers: fillers,
+    _globalFillers: fillers,      // 타임라인 점 찍기용
+    _fillerByType: fillerByType,  // 간투사 카드에서 사용
   };
 }
 
@@ -290,6 +320,20 @@ export default function AnalysisVoice() {
         const prog = Math.max(5, Math.min(95, Math.round(5 + (p / 100) * 90)));
         setProgress(prog);
       });
+
+  // 분석 결과 표준 JSON(segments_results.json)을 API로 한번 더 조회
+   try {
+     const r = await fetch(`${API_BASE}/api/speech/segments`, { cache: 'no-store' });
+     if (r.ok) {
+       const seg = await r.json();
+       if (seg?.filler) {
+         api.filler = seg.filler; // { total, by_type, occurrences }
+       }
+       if (seg?.summary?.filler_count != null) api.filler_count = seg.summary.filler_count;
+       if (Array.isArray(seg?.silence)) api.silence = seg.silence;
+     }
+   } catch (_) {}
+
       const ui = mapServiceToUi(api);
       setResult(ui);
       setProgress(100);
@@ -648,6 +692,11 @@ function ChartsBlock({ result, audioRef }) {
   const pauseRatioPct = Number((result?.features?.pause_ratio ?? 0) * 100);
 
   const fillerItems = React.useMemo(() => {
+    // ✅ 백엔드(by_type) 집계가 있으면 그대로 사용
+    if (Array.isArray(result?._fillerByType) && result._fillerByType.length) {
+      return [...result._fillerByType].sort((a,b)=>b.count-a.count).slice(0, 6);
+    }
+    // 없으면 occurrences로 폴백
     const m = new Map();
     (fillerOccurrences || []).forEach(f => {
       const w = String(f.word ?? '기타');
@@ -656,7 +705,7 @@ function ChartsBlock({ result, audioRef }) {
     return Array.from(m, ([word, count]) => ({ word, count }))
       .sort((a, b) => b.count - a.count)
       .slice(0, 6);
-  }, [fillerOccurrences]);
+  }, [fillerOccurrences, result?._fillerByType]);
 
   return (
     <div className="space-y-4">

@@ -1,17 +1,37 @@
+# ── OS / 에디터 캐시 ───────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── Python / 가상환경 ────────────────────────────────
 __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
+*.pyc
 *.egg-info/
+
+.venv/
+venv/
 .env
 .env.*
-venv/
-.venv/
-.DS_Store
 
+# 주피터 노트북 체크포인트(사용 시)
+.ipynb_checkpoints/
 
-# 프론트엔드 캐시 및 빌드 파일 무시
+# ── 로그 ────────────────────────────────────────────
+*.log
+
+# ── 프로젝트 산출물(추적 제외) ───────────────────────
+# 분석 결과/임시 파일은 디렉터리 단위로만 무시 (전역 *.html/*.json/*.txt 는 금지!)
+model/**/results/**
+model/**/tmp/**
+
+# ── Node / Frontend ─────────────────────────────────
+node_modules/
 frontend/node_modules/
 frontend/node_modules/.cache/
+
+dist/
+build/
 frontend/dist/
 frontend/build/
