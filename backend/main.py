@@ -1,4 +1,3 @@
-나의 말:
 # backend/main.py
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware

@@ -1,6 +1,5 @@
 // src/services/speechService.js
 
-// ⛔️ '@/lib/api' 별칭 대신 ⭕️ 상대경로 사용
 import api from '../lib/api';
 import { ENDPOINTS } from '../config/apiEndpoints';
 
@@ -24,13 +23,8 @@ function toAbsoluteUrl(pathOrUrl) {
 
 /** 파일 업로드 전용 엔드포인트 안전가드 */
 function getAnalyzePath() {
-  // 프로젝트 설정에서 제공되면 우선 사용
   let p = ENDPOINTS?.SPEECH_ANALYZE || '/speech/analyze';
-
-  // 혹시 잘못 evaluate 로 설정돼 있다면 교정
   if (/evaluate$/i.test(p)) p = '/speech/analyze';
-
-  // 혹시 공백/오타 방지
   if (typeof p !== 'string' || !p.trim()) p = '/speech/analyze';
   return p;
 }
@@ -49,10 +43,11 @@ export async function runSpeechAnalysis(audioFile, scriptFile, onProgress) {
   fd.append('audio', audioFile);
   fd.append('script', scriptFile);
 
-  const analyzePath = getAnalyzePath();
+  // ✅ 절대 URL로 강제 (상대경로로 3000번에 가는 문제 방지)
+  const url = toAbsoluteUrl(getAnalyzePath());
 
   try {
-    const { data } = await api.post(analyzePath, fd, {
+    const { data, headers } = await api.post(url, fd, {
       headers: { 'Content-Type': 'multipart/form-data' },
       onUploadProgress: (e) => {
         if (!onProgress || !e?.total) return;
@@ -60,66 +55,99 @@ export async function runSpeechAnalysis(audioFile, scriptFile, onProgress) {
         onProgress(Math.min(99, Math.max(1, pct))); // 1~99%
       },
       timeout: 1000 * 60 * 5,
-      // 업로드 중 413/422 등을 명확히 받기 위해 기본 validateStatus 유지
     });
 
-    // wpm 키 호환 처리
+    // 응답이 HTML로 오는 경우(라우팅/경로 문제) 방지
+    const ct = (headers?.['content-type'] || headers?.['Content-Type'] || '');
+    if (!ct.includes('application/json') && typeof data === 'string' && /<!doctype html>/i.test(data)) {
+      throw new Error('Expected JSON, got HTML. API_BASE 또는 엔드포인트 경로를 확인하세요.');
+    }
+
+    // ---- 키 호환 처리 (여러 백엔드 버전 지원) ----
     const wpmRaw =
       data?.wpm ??
       data?.precise_wpm ??
       data?.['WPM (Words Per Minute)'] ??
       null;
 
-    const sttRel = data?.stt_results_url || null;
+    // ✅ Pitch/MFCC 전역 통계: 한글 키를 그대로 보존 + 대안 키도 병합
+    const pitchMeanTop = (
+      data?.['Pitch 평균'] ??
+      data?.avg_pitch_mean ??
+      data?.pitch_mean ??
+      null
+    );
+    const pitchStdTop = (
+      data?.['Pitch 표준편차'] ??
+      data?.avg_pitch_std ??
+      data?.pitch_std ??
+      null
+    );
 
-    return {
+    const mfccMeanVec = (
+      Array.isArray(data?.['MFCC 평균']) ? data['MFCC 평균'] :
+      Array.isArray(data?.mfcc_mean)     ? data.mfcc_mean     :
+      []
+    );
+    const mfccStdVec = (
+      Array.isArray(data?.['MFCC 표준편차']) ? data['MFCC 표준편차'] :
+      Array.isArray(data?.mfcc_std)          ? data.mfcc_std          :
+      []
+    );
+
+    // 서비스 레이어 반환: 프론트 mapServiceToUi에서 그대로 읽게 함
+    const out = {
       pronunciation_accuracy: typeof data?.pronunciation_accuracy === 'number' ? data.pronunciation_accuracy : null,
-      pause_ratio:            typeof data?.pause_ratio === 'number'            ? data.pause_ratio            : null,
-      filler_count:           typeof data?.filler_count === 'number'           ? data.filler_count           : null,
+      pause_ratio:            typeof data?.pause_ratio === 'number'            ? data.pause_ratio            : (typeof data?.['무음 구간 비율'] === 'number' ? data['무음 구간 비율'] : null),
+      filler_count:           typeof data?.filler_count === 'number'           ? data.filler_count           : (typeof data?.['간투사 수'] === 'number' ? data['간투사 수'] : null),
       wpm:                    typeof wpmRaw === 'number' ? wpmRaw : (wpmRaw ? Number(wpmRaw) : null),
 
-      pitch_mean: typeof data?.pitch_mean === 'number' ? data.pitch_mean : null,
-      pitch_std:  typeof data?.pitch_std  === 'number' ? data.pitch_std  : null,
-      mfcc_mean:  Array.isArray(data?.mfcc_mean) ? data.mfcc_mean : [],
-      mfcc_std:   Array.isArray(data?.mfcc_std)  ? data.mfcc_std  : [],
+      // 🔴 여기가 핵심: 한글 키를 그대로 보존해서 상위로 전달
+      ['Pitch 평균']:      (typeof pitchMeanTop === 'number' ? pitchMeanTop : null),
+      ['Pitch 표준편차']:  (typeof pitchStdTop  === 'number' ? pitchStdTop  : null),
+      ['MFCC 평균']:       mfccMeanVec,
+      ['MFCC 표준편차']:   mfccStdVec,
+
+      // 기존 필드 유지
+      pitch_mean: (typeof data?.pitch_mean === 'number' ? data.pitch_mean : null),
+      pitch_std:  (typeof data?.pitch_std  === 'number' ? data.pitch_std  : null),
+      mfcc_mean:  mfccMeanVec,
+      mfcc_std:   mfccStdVec,
 
       scores:   data?.scores && typeof data.scores === 'object' ? data.scores : {},
       segments: Array.isArray(data?.segments) ? data.segments : [],
 
       feedback_text: data?.feedback_text || '',
-      stt_results_url: sttRel,                    // 상대 경로
-      stt_results_abs_url: toAbsoluteUrl(sttRel), // 절대 URL
+      stt_results_url: data?.stt_result_url || data?.stt_results_url || null,
+      stt_results_abs_url: toAbsoluteUrl(data?.stt_result_url || data?.stt_results_url || null),
 
       analysis_mode: data?.analysis_mode || (scriptFile ? 'audio+script' : 'audio_only'),
       _raw: data,
     };
+
+    return out;
   } catch (err) {
-    // Axios 에러 메시지 정규화
     const detail =
       err?.response?.data?.detail ??
       err?.response?.data?.message ??
       err?.message ??
       String(err);
 
-    // 흔한 실수: 세그먼트 JSON 라우트로 보냈을 때의 Pydantic 에러
     if (/start_sec|end_sec|type=missing|pydantic/i.test(String(detail))) {
       throw new Error(
         '서버가 세그먼트 JSON을 요구하는 라우트로 요청이 간 것 같아요. ' +
-        '서비스 레이어가 파일 업로드용 엔드포인트( /speech/run 또는 /speech/analyze )로 향하는지 확인해주세요.'
+        '서비스 레이어가 파일 업로드용 엔드포인트( /speech/analyze )로 향하는지 확인해주세요.'
       );
     }
 
-    // 413 Payload Too Large
     if (err?.response?.status === 413) {
       throw new Error('업로드한 파일 용량이 서버 제한을 초과했습니다. 더 작은 파일로 시도하거나 서버 설정을 늘려주세요.');
     }
 
-    // CORS 또는 네트워크
     if (/(CORS|Network Error)/i.test(String(detail))) {
       throw new Error('네트워크/CORS 문제로 요청이 차단되었습니다. 백엔드 주소와 CORS 설정을 확인해주세요.');
     }
 
-    // 기타
     throw new Error(typeof detail === 'string' ? detail : '요청 중 오류가 발생했습니다.');
   }
 }

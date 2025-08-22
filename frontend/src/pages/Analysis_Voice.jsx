@@ -75,6 +75,28 @@ const DUMMY_SILENCE = [
   { start_sec: 41, end_sec: 44 },
 ];
 
+// === KPI value helpers ===
+const pickNum = (...cands) => {
+  for (const v of cands) if (Number.isFinite(v)) return v;
+  return null;
+};
+const avgOf = (arr) =>
+  Array.isArray(arr) && arr.length
+    ? arr.reduce((s, x) => s + Number(x || 0), 0) / arr.length
+    : null;
+
+const getPitchTuple = (r) => ({
+  mean: pickNum(r?.["Pitch 평균"], r?.kpi?.pitch_mean, r?.pitch_mean),
+  std:  pickNum(r?.["Pitch 표준편차"], r?.kpi?.pitch_std, r?.pitch_std),
+});
+
+const getMFCCAvgTuple = (r) => {
+  const meanVec = r?.["MFCC 평균"] ?? r?.kpi?.mfcc_mean ?? r?.mfcc_mean;
+  const stdVec  = r?.["MFCC 표준편차"] ?? r?.kpi?.mfcc_std ?? r?.mfcc_std;
+  return { mean: avgOf(meanVec), std: avgOf(stdVec) };
+};
+
+
 /* ======================= 공용 UI 컴포넌트 ======================= */
 function SectionTitle({ icon, title, hint }) {
   return (
@@ -107,53 +129,77 @@ function SectionHeader({ number = "①", title, hint }) {
 function SilenceCard({ ratioPercent = 0 }) {
   const pct = Math.max(0, Math.min(100, Number(ratioPercent)));
   return (
-    <div className="p-4 rounded-2xl bg-white shadow-sm border border-gray-100">
-      <div className="flex items-center justify-between mb-2">
-        <h5 className="font-semibold">침묵 비율</h5>
-        <span className="text-xs px-2 py-0.5 rounded-full bg-gray-50 text-gray-500 border border-gray-200">Silence</span>
-      </div>
-      <div className="flex items-baseline gap-2">
-        <span className="text-3xl font-bold" style={{ color: COLOR_PRIMARY }}>
-          {pct.toFixed(1)}%
-        </span>
-        <span className="text-sm text-gray-500">전체 발화 중</span>
-      </div>
-      <div className="mt-3 h-2 w-full bg-gray-100 rounded-full overflow-hidden" aria-hidden>
-        <div className="h-full rounded-full" style={{ width: `${pct}%`, backgroundColor: COLOR_PRIMARY }} />
-      </div>
-      <p className="mt-2 text-xs text-gray-600">
-        {pct < 8 ? '침묵이 적절합니다.' : pct < 15 ? '침묵이 다소 많아요.' : '침묵이 높은 편입니다.'}
-      </p>
+  <div className="p-4 rounded-2xl bg-white shadow-sm border border-gray-100 flex flex-col">
+    <div className="flex items-center justify-between mb-2">
+      <h5 className="font-semibold">침묵 비율</h5>
+      <span className="text-xs px-2 py-0.5 rounded-full bg-gray-50 text-gray-500 border border-gray-200">
+        Silence
+      </span>
     </div>
-  );
+
+    <div className="flex items-baseline gap-2">
+      <span className="text-3xl font-bold" style={{ color: COLOR_PRIMARY }}>
+        {pct.toFixed(1)}%
+      </span>
+      <span className="text-sm text-gray-500">전체 발화 중</span>
+    </div>
+
+    <div
+      className="mt-3 h-2 w-full bg-gray-100 rounded-full overflow-hidden"
+      aria-hidden
+    >
+      <div
+        className="h-full rounded-full"
+        style={{ width: `${pct}%`, backgroundColor: COLOR_PRIMARY }}
+      />
+    </div>
+
+    {/* 설명문구: 카드 맨 아래 고정 */}
+    <p className="text-xs text-gray-600 mt-auto pt-2">
+      긴 침묵은 줄이고, 짧게 멈추면 좋아요.
+    </p>
+  </div>
+);
 }
 
 function FillerCard({ items = [] }) {
   const total = items.reduce((s, it) => s + Number(it.count || 0), 0);
   return (
-    <div className="p-4 rounded-2xl bg-white shadow-sm border border-gray-100">
+    <div className="p-4 rounded-2xl bg-white shadow-sm border border-gray-100 flex flex-col">
       <div className="flex items-center justify-between mb-2">
         <h5 className="font-semibold">간투사 사용</h5>
-        <span className="text-xs px-2 py-0.5 rounded-full bg-gray-50 text-gray-500 border border-gray-200">Fillers</span>
+        <span className="text-xs px-2 py-0.5 rounded-full bg-gray-50 text-gray-500 border border-gray-200">
+          Fillers
+        </span>
       </div>
-      {/* 총 사용 숫자와 '회'를 같은 스타일로 통일 */}
+
+      {/* 총 사용 숫자와 '회' 통일 */}
       <div className="flex items-end gap-2 mb-2">
-        <span className="text-3xl font-bold" style={{ color: COLOR_SECONDARY }}>{total}회</span>
+        <span className="text-3xl font-bold" style={{ color: COLOR_SECONDARY }}>
+          {total}회
+        </span>
         <span className="text-sm text-gray-500">총 사용</span>
       </div>
+
       {items.length ? (
         <ul className="divide-y divide-gray-100">
           {items.map((it, i) => (
             <li key={`${it.word}-${i}`} className="py-1.5 text-sm flex justify-between">
               <span className="text-gray-700">{it.word}</span>
-              <span className="font-medium" style={{ color: COLOR_SECONDARY }}>{it.count}회</span>
+              <span className="font-medium" style={{ color: COLOR_SECONDARY }}>
+                {it.count}회
+              </span>
             </li>
           ))}
         </ul>
       ) : (
         <div className="text-sm text-gray-500">간투사 없음 🎉</div>
       )}
-      <p className="mt-2 text-xs text-gray-600">간투사를 줄이면 메시지가 더 명확해져요.</p>
+
+      {/* 고정 멘트: 카드 하단 */}
+      <p className="text-xs text-gray-600 mt-auto pt-2">
+        간투사를 줄이면 메시지가 더 명확해져요.
+      </p>
     </div>
   );
 }
@@ -270,25 +316,60 @@ function mapServiceToUi(api) {
   const mfccStdAvg = mfccStd.length ? mean(mfccStd.map(Math.abs)) : 0;
   const mfcc5   = clamp((50 - Math.min(50, mfccStdAvg)) / 50 * 5, 0, 5);
 
-  return {
-    scores: {
-      pronunciation: clamp(pronunciation_accuracy * 5, 0, 5),
-      intonation:    intonation5,
-      speed:         speed5,
-      filler:        filler5,
-      pause:         pause5,
-      mfcc:          mfcc5,
-    },
-    // ✅ KPI 카드가 filler_count(=filler.total)을 쓰도록
-    features: { pronunciation_accuracy, wpm, filler_count, pause_ratio },
-    feedback: api?.feedback_text || "분석 결과를 불러왔습니다. 상세 항목을 확인해 보세요.",
-    feedback_bullets: Array.isArray(api?.feedback_bullets) ? api.feedback_bullets : [],
-    stt_html_url: api?.stt_result_url || api?.stt_results_url || null,
-    segments,
-    _globalSilence: silence,
-    _globalFillers: fillers,      // 타임라인 점 찍기용
-    _fillerByType: fillerByType,  // 간투사 카드에서 사용
-  };
+  // === [ADD] KPI용 전역 Pitch/MFCC 값 확보 ===
+const _pitchMeanTop = Number(
+  api?.["Pitch 평균"] ?? api?.avg_pitch_mean ?? api?.pitch_mean ?? NaN
+);
+const _pitchStdTop  = Number(
+  api?.["Pitch 표준편차"] ?? api?.avg_pitch_std ?? api?.pitch_std ?? NaN
+);
+const _mfccMeanVec =
+  Array.isArray(api?.["MFCC 평균"]) ? api["MFCC 평균"]
+  : Array.isArray(api?.mfcc_mean)     ? api.mfcc_mean
+  : [];
+const _mfccStdVec  =
+  Array.isArray(api?.["MFCC 표준편차"]) ? api["MFCC 표준편차"]
+  : Array.isArray(api?.mfcc_std)         ? api.mfcc_std
+  : [];
+
+
+return {
+  // === 기존 필드 유지 ===
+  scores: {
+    pronunciation: clamp(pronunciation_accuracy * 5, 0, 5),
+    intonation:    intonation5,
+    speed:         speed5,
+    filler:        filler5,
+    pause:         pause5,
+    mfcc:          mfcc5,
+  },
+  // ✅ KPI 카드가 filler_count(=filler.total)을 쓰도록
+  features: { pronunciation_accuracy, wpm, filler_count, pause_ratio },
+
+  feedback: api?.feedback_text || "분석 결과를 불러왔습니다. 상세 항목을 확인해 보세요.",
+  feedback_bullets: Array.isArray(api?.feedback_bullets) ? api.feedback_bullets : [],
+  stt_html_url: api?.stt_result_url || api?.stt_results_url || null,
+
+  segments,
+  _globalSilence: silence,
+  _globalFillers: fillers,      // 타임라인 점 찍기용
+  _fillerByType: fillerByType,  // 간투사 카드에서 사용
+
+  // === [ADD-1] KPI 블록: 카드/헬퍼 고정 경로 ===
+  kpi: {
+    pitch_mean: Number.isFinite(_pitchMeanTop) ? _pitchMeanTop : null,
+    pitch_std:  Number.isFinite(_pitchStdTop)  ? _pitchStdTop  : null,
+    mfcc_mean:  _mfccMeanVec,
+    mfcc_std:   _mfccStdVec,
+  },
+
+  // === [ADD-2] 한글 키도 그대로 노출 (기존 카드 호환) ===
+  ["Pitch 평균"]:     Number.isFinite(_pitchMeanTop) ? _pitchMeanTop : null,
+  ["Pitch 표준편차"]: Number.isFinite(_pitchStdTop)  ? _pitchStdTop  : null,
+  ["MFCC 평균"]:      _mfccMeanVec,
+  ["MFCC 표준편차"]:  _mfccStdVec,
+};
+
 }
 
 /* ======================= 메인 페이지 ======================= */
@@ -499,20 +580,58 @@ function ResultSection({ result, audioUrl, audioRef, onReplay, onReload, radarDa
         </div>
       )}
 
-      {/* 전체 점수(상단) */}
-      <div className="text-center text-xl font-semibold text-gray-700">
-        🎯 전체 점수: <span style={{ color: COLOR_SECONDARY }}>{Number.isFinite(totalScore10) ? totalScore10 : '0.0'}</span> / 10
-      </div>
+{/* KPI */}
+<div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-4 sm:gap-6">
+  <ResultCard
+    icon={<CheckCircle />}
+    label="발음 정확도"
+    value={`${((result?.features?.pronunciation_accuracy ?? 0) * 100).toFixed(1)}%`}
+  />
 
-      {/* KPI */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-4 sm:gap-6">
-        <ResultCard icon={<CheckCircle />} label="발음 정확도" value={`${(result.features.pronunciation_accuracy * 100).toFixed(1)}%`} />
-        <ResultCard icon={<Volume2 />}   label="발화 속도"   value={`${result.features.wpm?.toFixed(1) ?? 'N/A'} WPM`} />
-        <ResultCard icon={<Activity />}  label="억양 다양성" value={`${((result.scores.intonation ?? 0) * 2).toFixed(1)} / 10`} />
-        <ResultCard icon={<Slash />}     label="간투사 사용" value={`${result.features.filler_count ?? 0}회`} />
-        <ResultCard icon={<PauseCircle />} label="무음 비율" value={`${(result.features.pause_ratio * 100).toFixed(1)}%`} />
-        <ResultCard icon={<AudioLines />} label="음색 안정성" value={`${((result.scores.mfcc ?? 0) * 2).toFixed(1)} / 10`} />
-      </div>
+  <ResultCard
+    icon={<Volume2 />}
+    label="발화 속도"
+    value={`${(result?.features?.wpm ?? 0).toFixed(1)} WPM`}
+  />
+
+  {/* 억양 다양성: Pitch 평균 / Pitch 표준편차 */}
+  <ResultCard
+    icon={<Activity />}
+    label="억양 다양성"
+    value={(() => {
+      const { mean, std } = getPitchTuple(result);
+      return (mean != null && std != null)
+        ? `${mean.toFixed(2)} / ${std.toFixed(2)}`
+        : "N/A";
+    })()}
+  />
+
+  <ResultCard
+    icon={<Slash />}
+    label="간투사 사용"
+    value={`${result?.features?.filler_count ?? 0}회`}
+  />
+
+  <ResultCard
+    icon={<PauseCircle />}
+    label="무음 비율"
+    value={`${((result?.features?.pause_ratio ?? 0) * 100).toFixed(1)}%`}
+  />
+
+  {/* 음색 안정성: MFCC 평균벡터/표준편차벡터의 평균값 요약 */}
+  <ResultCard
+    icon={<AudioLines />}
+    label="음색 안정성"
+    value={(() => {
+      const { mean, std } = getMFCCAvgTuple(result);
+      return (mean != null && std != null)
+        ? `${mean.toFixed(2)} / ${std.toFixed(2)}`
+        : "N/A";
+    })()}
+  />
+</div>
+
+
 
       {/* 발표 특징 분석 */}
       <section id="analysis" className="py-10 -mx-4 sm:mx-0 bg-[#f8fafc]">
