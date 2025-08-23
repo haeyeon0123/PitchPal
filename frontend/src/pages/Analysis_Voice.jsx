@@ -64,11 +64,6 @@ const DUMMY_SEGMENTS = Array.from({ length: 12 }, (_, i) => ({
   fillers: [],
   silence: []
 }));
-const DUMMY_FILLERS = [
-  { time_sec: 11, word: "어", duration: 0.3 },
-  { time_sec: 26, word: "음", duration: 0.4 },
-  { time_sec: 47, word: "그", duration: 0.2 },
-];
 const DUMMY_SILENCE = [
   { start_sec: 15, end_sec: 18 },
   { start_sec: 41, end_sec: 44 },
@@ -160,8 +155,9 @@ function SilenceCard({ ratioPercent = 0 }) {
 );
 }
 
-function FillerCard({ items = [] }) {
-  const total = items.reduce((s, it) => s + Number(it.count || 0), 0);
+// ✅ 총합은 props.total로만 표시 (items 합산 X)
+function FillerCard({ total = 0, items = [] }) {
+  const totalNum = Number(total) || 0;
   return (
     <div className="p-4 rounded-2xl bg-white shadow-sm border border-gray-100 flex flex-col">
       <div className="flex items-center justify-between mb-2">
@@ -173,7 +169,7 @@ function FillerCard({ items = [] }) {
 
       <div className="flex items-end gap-2 mb-2">
         <span className="text-3xl font-bold" style={{ color: COLOR_SECONDARY }}>
-          {total}회
+          {totalNum}회
         </span>
         <span className="text-sm text-gray-500">총 사용</span>
       </div>
@@ -216,14 +212,14 @@ function mapServiceToUi(api) {
   const wpm = Number(api?.wpm ?? api?.WPM ?? 0);
   const pause_ratio = Number(api?.pause_ratio ?? api?.["Pause Ratio"] ?? api?.무음_구간_비율 ?? 0);
 
-  // ✅ 간투사 총합: fillers_total > filler.total > filler_count
-  const filler_count = Number(
-    api?.fillers_total ??
+  // ✅ 간투사 총합: "Filler Count" → filler.total → filler_count → 간투사_수
+  let filler_count = Number(
+    api?.["Filler Count"] ??
     (api?.filler && typeof api.filler.total !== 'undefined' ? api.filler.total : undefined) ??
-    api?.filler_count ?? api?.["Filler Count"] ?? api?.간투사_수 ?? 0
+    api?.filler_count ?? api?.간투사_수 ?? api?.fillerTotal ?? 0
   );
 
-  // ---- 세그먼트: 백엔드 표준(seg.start_sec/end_sec/pitch_mean) 직접 사용 ----
+  // ---- 세그먼트 ----
   const segIn = Array.isArray(api?.segments) ? api.segments : [];
   const stride = Number(api?.segment_stride_sec ?? 5);
 
@@ -247,23 +243,59 @@ function mapServiceToUi(api) {
       })
     : DUMMY_SEGMENTS;
 
-  // ---- 침묵/간투사 ----
+  // ---- 침묵 ----
   const silence = Array.isArray(api?.silence) ? api.silence.map(iv => ({
     start_sec: Number(iv.start_sec ?? iv.start ?? 0),
     end_sec:   Number(iv.end_sec   ?? iv.end   ?? 0),
   })) : [];
 
-  // 유형별 집계: filler_words(객체) 우선 → filler.by_type → occurrences 집계
-  let fillerByType = [];
-  if (api?.filler_words && typeof api.filler_words === 'object') {
-    fillerByType = Object.entries(api.filler_words).map(([word, count]) => ({ word, count: Number(count || 0) }));
-  } else if (api?.filler?.by_type && typeof api.filler.by_type === 'object') {
-    fillerByType = Object.entries(api.filler.by_type).map(([word, count]) => ({ word, count: Number(count || 0) }));
-  } else {
-    const occ = Array.isArray(api?.filler?.occurrences) ? api.filler.occurrences : [];
-    const m = new Map();
-    occ.forEach(o => m.set(String(o.type ?? o.word ?? '기타'), (m.get(String(o.type ?? o.word ?? '기타')) || 0) + 1));
-    fillerByType = Array.from(m, ([word, count]) => ({ word, count }));
+  // ---- 간투사 occurrences 단일 소스 생성 ----
+  // 우선순위: **top-level `filler_occurrences`** → `filler.occurrences` → "Filler Words" → 구형 `api.fillers`
+  let filler_occurrences = [];
+  if (Array.isArray(api?.filler_occurrences)) {
+    filler_occurrences = api.filler_occurrences
+      .map(o => {
+        const start = Number(o.start ?? o.start_sec ?? NaN);
+        const end   = Number(o.end ?? o.end_sec ?? NaN);
+        const time  = Number.isFinite(o.time) ? Number(o.time)
+                    : (Number.isFinite(start) && Number.isFinite(end)) ? (start + end) / 2 : NaN;
+        const word  = String(o.word ?? o.type ?? 'F');
+        return Number.isFinite(time) ? { time_sec: time, word } : null;
+      })
+      .filter(Boolean);
+  } else if (Array.isArray(api?.filler?.occurrences)) {
+    filler_occurrences = api.filler.occurrences
+      .map(o => {
+        const start = Number(o.start ?? o.start_sec ?? NaN);
+        const end   = Number(o.end ?? o.end_sec ?? NaN);
+        const time  = Number.isFinite(o.time) ? Number(o.time)
+                    : (Number.isFinite(start) && Number.isFinite(end)) ? (start + end) / 2 : NaN;
+        const word  = String(o.word ?? o.type ?? 'F');
+        return Number.isFinite(time) ? { time_sec: time, word } : null;
+      })
+      .filter(Boolean);
+  } else if (Array.isArray(api?.["Filler Words"])) {
+    // total_temp.py 스타일: [word, start, end]
+    filler_occurrences = api["Filler Words"]
+      .map(a => Array.isArray(a) && a.length >= 3
+        ? { time_sec: (Number(a[1]) + Number(a[2])) / 2, word: String(a[0]) }
+        : null)
+      .filter(Boolean);
+  } else if (Array.isArray(api?.fillers)) {
+    filler_occurrences = api.fillers
+      .map(f => {
+        const start = Number(f.start_sec ?? f.start ?? NaN);
+        const end   = Number(f.end_sec   ?? f.end   ?? NaN);
+        const time  = Number(f.time ?? f.time_sec ?? ((Number.isFinite(start) && Number.isFinite(end)) ? (start + end) / 2 : NaN));
+        const word  = String(f.token ?? f.word ?? 'F');
+        return Number.isFinite(time) ? { time_sec: time, word } : null;
+      })
+      .filter(Boolean);
+  }
+
+  // 총합이 없고 occurrences가 있으면 길이로 보정
+  if ((!Number.isFinite(filler_count) || filler_count === 0) && filler_occurrences.length) {
+    filler_count = filler_occurrences.length;
   }
 
   // ---- 레이더 스코어(0~5) ----
@@ -299,8 +331,9 @@ function mapServiceToUi(api) {
 
     segments,
     _globalSilence: silence,
-    _globalFillers: Array.isArray(api?.fillers) ? api.fillers.map(f => ({ time_sec: Number(f.time), word: String(f.token ?? f.word ?? 'F') })) : [],
-    _fillerByType: fillerByType,
+
+    // ✅ 하단 분석에서 사용할 단일 소스
+    filler_occurrences,
 
     // KPI 블록
     kpi: {
@@ -375,20 +408,24 @@ export default function AnalysisVoice() {
         if (segResp.ok) {
           const seg = await segResp.json();
 
-          const total =
-            typeof seg?.summary?.filler_count === 'number'
-              ? seg.summary.filler_count
-              : (seg?.summary?.fillers_by_type
-                  ? Object.values(seg.summary.fillers_by_type).reduce((a, b) => a + Number(b || 0), 0)
-                  : 0);
-
-          const byType = seg?.summary?.fillers_by_type || {};
-          let occurrences = Array.isArray(seg?.filler?.occurrences) ? seg.filler.occurrences : [];
-
-          api.filler = { total, by_type: byType, occurrences };
-          api.filler_count = total;
+          // 침묵/세그먼트 보강
           if (Array.isArray(seg?.silence)) api.silence = seg.silence;
           if (Array.isArray(seg?.segments) && !api.segments) api.segments = seg.segments;
+
+          // 요약 집계가 있으면 넘겨줌
+          if (typeof seg?.summary?.filler_count === 'number') {
+            api.filler = api.filler || {};
+            api.filler.total = seg.summary.filler_count;
+          }
+          if (seg?.summary?.fillers_by_type) {
+            api.filler = api.filler || {};
+            api.filler.by_type = seg.summary.fillers_by_type;
+          }
+          if (Array.isArray(seg?.filler?.occurrences)) {
+            // 참고: mapServiceToUi가 filler.occurrences도 읽는다.
+            api.filler = api.filler || {};
+            api.filler.occurrences = seg.filler.occurrences;
+          }
         }
       } catch (_) {}
 
@@ -516,7 +553,8 @@ export default function AnalysisVoice() {
               />
             </div>
             <p className="mt-2 text-xs text-gray-500">
-              {statusText} {progress}%</p>
+              {statusText} {progress}%
+            </p>
           </div>
         )}
 
@@ -738,33 +776,12 @@ function ChartsBlock({ result, audioRef }) {
 
   const segments = result?.segments?.length ? result.segments : DUMMY_SEGMENTS;
 
-  // 전역이 비어있으면 세그먼트 상대시간을 절대시간으로 보정
-  const fillerOccurrences = React.useMemo(() => {
-    if (Array.isArray(result?._globalFillers) && result._globalFillers.length) return result._globalFillers;
-    const list = [];
-    (segments || []).forEach((s) => {
-      const { start: segStart } = parseTimeRange(s.time_range);
-      (s.fillers || []).forEach((fv) => {
-        let t = null, word = '어';
-        if (Array.isArray(fv)) {
-          const fs = Number(fv[1] ?? 0), fe = Number(fv[2] ?? fs);
-          t = (fs + fe) / 2; word = String(fv[0] ?? '어');
-        } else if (typeof fv === 'object') {
-          if ('time_sec' in fv || 'time' in fv) t = Number(fv.time_sec ?? fv.time);
-          else if ('start_sec' in fv || 'end_sec' in fv) t = Number(((fv.start_sec ?? 0) + (fv.end_sec ?? 0)) / 2);
-          else if ('start_rel' in fv || 'end_rel' in fv) {
-            const fs = Number(segStart + (fv.start_rel ?? 0));
-            const fe = Number(segStart + (fv.end_rel ?? (fv.start_rel ?? 0)));
-            t = (fs + fe) / 2;
-          }
-          word = String(fv.word ?? fv.token ?? '어');
-        }
-        if (Number.isFinite(t)) list.push({ time_sec: t, word, duration: 0.3 });
-      });
-    });
-    return list.length ? list : DUMMY_FILLERS;
-  }, [result, segments]);
+  // ✅ 간투사: 단일 소스(result.filler_occurrences)만 사용
+  const fillerOccurrences = Array.isArray(result?.filler_occurrences)
+    ? result.filler_occurrences
+    : [];
 
+  // 침묵: 기존 로직 유지
   const silenceIntervals = React.useMemo(() => {
     if (Array.isArray(result?._globalSilence) && result._globalSilence.length) return result._globalSilence;
     const list = [];
@@ -787,10 +804,8 @@ function ChartsBlock({ result, audioRef }) {
 
   const pauseRatioPct = Number((result?.features?.pause_ratio ?? 0) * 100);
 
+  // 종류 리스트 집계 (어/음/그…)
   const fillerItems = React.useMemo(() => {
-    if (Array.isArray(result?._fillerByType) && result._fillerByType.length) {
-      return [...result._fillerByType].sort((a,b)=>b.count-a.count).slice(0, 6);
-    }
     const m = new Map();
     (fillerOccurrences || []).forEach(f => {
       const w = String(f.word ?? '기타');
@@ -799,7 +814,7 @@ function ChartsBlock({ result, audioRef }) {
     return Array.from(m, ([word, count]) => ({ word, count }))
       .sort((a, b) => b.count - a.count)
       .slice(0, 6);
-  }, [fillerOccurrences, result?._fillerByType]);
+  }, [fillerOccurrences]);
 
   return (
     <div className="space-y-4">
@@ -825,7 +840,7 @@ function ChartsBlock({ result, audioRef }) {
           <MFCCSparkMini segments={segments} audioRef={audioRef} />
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
             <SilenceCard ratioPercent={pauseRatioPct} />
-            <FillerCard items={fillerItems} />
+            <FillerCard total={result?.features?.filler_count} items={fillerItems} />
           </div>
         </div>
       ) : (
@@ -835,7 +850,7 @@ function ChartsBlock({ result, audioRef }) {
           <MFCCOverall segments={segments} audioRef={audioRef} height={220} />
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
             <SilenceCard ratioPercent={pauseRatioPct} />
-            <FillerCard items={fillerItems} />
+            <FillerCard total={result?.features?.filler_count} items={fillerItems} />
           </div>
         </div>
       )}
