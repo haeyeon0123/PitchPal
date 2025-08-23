@@ -206,7 +206,7 @@ function FillerCard({ items = [] }) {
 
 /* ======================= API → UI 매핑 (service 응답 표준) ======================= */
 /**
- * 백엔드(/speech/analyze) 응답 → 이 페이지에서 쓰는 형태로 변환
+ * 백엔드(/speech/analyze 또는 /speech/result) 응답 → 이 페이지에서 쓰는 형태로 변환
  */
 function mapServiceToUi(api) {
   const pronunciation_accuracy = Number(api?.pronunciation_accuracy ?? api?.발음_유사도_점수 ?? 0) / (api?.발음_유사도_점수 ? 100 : 1);
@@ -317,59 +317,57 @@ function mapServiceToUi(api) {
   const mfcc5   = clamp((50 - Math.min(50, mfccStdAvg)) / 50 * 5, 0, 5);
 
   // === [ADD] KPI용 전역 Pitch/MFCC 값 확보 ===
-const _pitchMeanTop = Number(
-  api?.["Pitch 평균"] ?? api?.avg_pitch_mean ?? api?.pitch_mean ?? NaN
-);
-const _pitchStdTop  = Number(
-  api?.["Pitch 표준편차"] ?? api?.avg_pitch_std ?? api?.pitch_std ?? NaN
-);
-const _mfccMeanVec =
-  Array.isArray(api?.["MFCC 평균"]) ? api["MFCC 평균"]
-  : Array.isArray(api?.mfcc_mean)     ? api.mfcc_mean
-  : [];
-const _mfccStdVec  =
-  Array.isArray(api?.["MFCC 표준편차"]) ? api["MFCC 표준편차"]
-  : Array.isArray(api?.mfcc_std)         ? api.mfcc_std
-  : [];
+  const _pitchMeanTop = Number(
+    api?.["Pitch 평균"] ?? api?.avg_pitch_mean ?? api?.pitch_mean ?? NaN
+  );
+  const _pitchStdTop  = Number(
+    api?.["Pitch 표준편차"] ?? api?.avg_pitch_std ?? api?.pitch_std ?? NaN
+  );
+  const _mfccMeanVec =
+    Array.isArray(api?.["MFCC 평균"]) ? api["MFCC 평균"]
+    : Array.isArray(api?.mfcc_mean)     ? api.mfcc_mean
+    : [];
+  const _mfccStdVec  =
+    Array.isArray(api?.["MFCC 표준편차"]) ? api["MFCC 표준편차"]
+    : Array.isArray(api?.mfcc_std)         ? api.mfcc_std
+    : [];
 
+  return {
+    // === 기존 필드 유지 ===
+    scores: {
+      pronunciation: clamp(pronunciation_accuracy * 5, 0, 5),
+      intonation:    intonation5,
+      speed:         speed5,
+      filler:        filler5,
+      pause:         pause5,
+      mfcc:          mfcc5,
+    },
+    // ✅ KPI 카드가 filler_count(=filler.total)을 쓰도록
+    features: { pronunciation_accuracy, wpm, filler_count, pause_ratio },
 
-return {
-  // === 기존 필드 유지 ===
-  scores: {
-    pronunciation: clamp(pronunciation_accuracy * 5, 0, 5),
-    intonation:    intonation5,
-    speed:         speed5,
-    filler:        filler5,
-    pause:         pause5,
-    mfcc:          mfcc5,
-  },
-  // ✅ KPI 카드가 filler_count(=filler.total)을 쓰도록
-  features: { pronunciation_accuracy, wpm, filler_count, pause_ratio },
+    feedback: api?.feedback_text || "분석 결과를 불러왔습니다. 상세 항목을 확인해 보세요.",
+    feedback_bullets: Array.isArray(api?.feedback_bullets) ? api.feedback_bullets : [],
+    stt_html_url: api?.stt_result_url || api?.stt_results_url || null,
 
-  feedback: api?.feedback_text || "분석 결과를 불러왔습니다. 상세 항목을 확인해 보세요.",
-  feedback_bullets: Array.isArray(api?.feedback_bullets) ? api.feedback_bullets : [],
-  stt_html_url: api?.stt_result_url || api?.stt_results_url || null,
+    segments,
+    _globalSilence: silence,
+    _globalFillers: fillers,      // 타임라인 점 찍기용
+    _fillerByType: fillerByType,  // 간투사 카드에서 사용
 
-  segments,
-  _globalSilence: silence,
-  _globalFillers: fillers,      // 타임라인 점 찍기용
-  _fillerByType: fillerByType,  // 간투사 카드에서 사용
+    // === [ADD-1] KPI 블록: 카드/헬퍼 고정 경로 ===
+    kpi: {
+      pitch_mean: Number.isFinite(_pitchMeanTop) ? _pitchMeanTop : null,
+      pitch_std:  Number.isFinite(_pitchStdTop)  ? _pitchStdTop  : null,
+      mfcc_mean:  _mfccMeanVec,
+      mfcc_std:   _mfccStdVec,
+    },
 
-  // === [ADD-1] KPI 블록: 카드/헬퍼 고정 경로 ===
-  kpi: {
-    pitch_mean: Number.isFinite(_pitchMeanTop) ? _pitchMeanTop : null,
-    pitch_std:  Number.isFinite(_pitchStdTop)  ? _pitchStdTop  : null,
-    mfcc_mean:  _mfccMeanVec,
-    mfcc_std:   _mfccStdVec,
-  },
-
-  // === [ADD-2] 한글 키도 그대로 노출 (기존 카드 호환) ===
-  ["Pitch 평균"]:     Number.isFinite(_pitchMeanTop) ? _pitchMeanTop : null,
-  ["Pitch 표준편차"]: Number.isFinite(_pitchStdTop)  ? _pitchStdTop  : null,
-  ["MFCC 평균"]:      _mfccMeanVec,
-  ["MFCC 표준편차"]:  _mfccStdVec,
-};
-
+    // === [ADD-2] 한글 키도 그대로 노출 (기존 카드 호환) ===
+    ["Pitch 평균"]:     Number.isFinite(_pitchMeanTop) ? _pitchMeanTop : null,
+    ["Pitch 표준편차"]: Number.isFinite(_pitchStdTop)  ? _pitchStdTop  : null,
+    ["MFCC 평균"]:      _mfccMeanVec,
+    ["MFCC 표준편차"]:  _mfccStdVec,
+  };
 }
 
 /* ======================= 메인 페이지 ======================= */
@@ -380,10 +378,22 @@ export default function AnalysisVoice() {
   const [result, setResult] = useState(null);
   const [radarData, setRadarData] = useState([]);
   const [progress, setProgress] = useState(0);
+  const [statusText, setStatusText] = useState(''); // 진행 상태 텍스트
 
   const audioInputRef = useRef(null);
   const scriptInputRef = useRef(null);
   const audioRef = useRef(null);
+
+  const statusToText = (s) => {
+    switch ((s || '').toLowerCase()) {
+      case 'queued': return '대기중…';
+      case 'uploading': return '업로드 중…';
+      case 'running': return '분석 중…';
+      case 'fetching_result': return '결과 정리 중…';
+      case 'done': return '완료';
+      default: return s || '진행 중…';
+    }
+  };
 
   /** 실제 FastAPI 호출: multipart 업로드 */
   const handleAnalyze = useCallback(async () => {
@@ -395,29 +405,36 @@ export default function AnalysisVoice() {
     setLoading(true);
     setResult(null);
     setProgress(5);
+    setStatusText('업로드 준비 중…');
 
     try {
-      const api = await runSpeechAnalysis(fileInfo.audio, fileInfo.script, (p) => {
-        const prog = Math.max(5, Math.min(95, Math.round(5 + (p / 100) * 90)));
-        setProgress(prog);
-      });
+      const api = await runSpeechAnalysis(
+        fileInfo.audio,
+        fileInfo.script,
+        (p, status) => {
+          const prog = Math.max(5, Math.min(95, Math.round(p)));
+          setProgress(prog);
+          if (status) setStatusText(statusToText(status));
+        }
+      );
 
-  // 분석 결과 표준 JSON(segments_results.json)을 API로 한번 더 조회
-   try {
-     const r = await fetch(`${API_BASE}/api/speech/segments`, { cache: 'no-store' });
-     if (r.ok) {
-       const seg = await r.json();
-       if (seg?.filler) {
-         api.filler = seg.filler; // { total, by_type, occurrences }
-       }
-       if (seg?.summary?.filler_count != null) api.filler_count = seg.summary.filler_count;
-       if (Array.isArray(seg?.silence)) api.silence = seg.silence;
-     }
-   } catch (_) {}
+      // 분석 결과 표준 JSON(segments_results.json)을 API로 한번 더 조회
+      try {
+        const r = await fetch(`${API_BASE}/api/speech/segments`, { cache: 'no-store' });
+        if (r.ok) {
+          const seg = await r.json();
+          if (seg?.filler) {
+            api.filler = seg.filler; // { total, by_type, occurrences }
+          }
+          if (seg?.summary?.filler_count != null) api.filler_count = seg.summary.filler_count;
+          if (Array.isArray(seg?.silence)) api.silence = seg.silence;
+        }
+      } catch (_) {}
 
       const ui = mapServiceToUi(api);
       setResult(ui);
       setProgress(100);
+      setStatusText('완료');
     } catch (e) {
       console.error('analysis error', e);
       const raw =
@@ -426,6 +443,7 @@ export default function AnalysisVoice() {
         '분석 중 오류가 발생했어요.';
       setError(raw);
       setProgress(0);
+      setStatusText('');
     } finally {
       setLoading(false);
     }
@@ -439,6 +457,7 @@ export default function AnalysisVoice() {
     if (scriptInputRef.current) scriptInputRef.current.value = '';
     setLoading(false);
     setProgress(0);
+    setStatusText('');
     setError(null);
     setResult(null);
     setRadarData([]);
@@ -535,7 +554,8 @@ export default function AnalysisVoice() {
                 style={{ width: `${progress}%`, backgroundColor: COLOR_SECONDARY, transition: 'width 0.2s ease' }}
               />
             </div>
-            <p className="mt-2 text-xs text-gray-500">업로드 및 분석 진행 중… {progress}%</p>
+            <p className="mt-2 text-xs text-gray-500">
+              {statusText} {progress}%</p>
           </div>
         )}
 
@@ -580,58 +600,56 @@ function ResultSection({ result, audioUrl, audioRef, onReplay, onReload, radarDa
         </div>
       )}
 
-{/* KPI */}
-<div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-4 sm:gap-6">
-  <ResultCard
-    icon={<CheckCircle />}
-    label="발음 정확도"
-    value={`${((result?.features?.pronunciation_accuracy ?? 0) * 100).toFixed(1)}%`}
-  />
+      {/* KPI */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-4 sm:gap-6">
+        <ResultCard
+          icon={<CheckCircle />}
+          label="발음 정확도"
+          value={`${((result?.features?.pronunciation_accuracy ?? 0) * 100).toFixed(1)}%`}
+        />
 
-  <ResultCard
-    icon={<Volume2 />}
-    label="발화 속도"
-    value={`${(result?.features?.wpm ?? 0).toFixed(1)} WPM`}
-  />
+        <ResultCard
+          icon={<Volume2 />}
+          label="발화 속도"
+          value={`${(result?.features?.wpm ?? 0).toFixed(1)} WPM`}
+        />
 
-  {/* 억양 다양성: Pitch 평균 / Pitch 표준편차 */}
-  <ResultCard
-    icon={<Activity />}
-    label="억양 다양성"
-    value={(() => {
-      const { mean, std } = getPitchTuple(result);
-      return (mean != null && std != null)
-        ? `${mean.toFixed(2)} / ${std.toFixed(2)}`
-        : "N/A";
-    })()}
-  />
+        {/* 억양 다양성: Pitch 평균 / Pitch 표준편차 */}
+        <ResultCard
+          icon={<Activity />}
+          label="억양 다양성"
+          value={(() => {
+            const { mean, std } = getPitchTuple(result);
+            return (mean != null && std != null)
+              ? `${mean.toFixed(2)} / ${std.toFixed(2)}`
+              : "N/A";
+          })()}
+        />
 
-  <ResultCard
-    icon={<Slash />}
-    label="간투사 사용"
-    value={`${result?.features?.filler_count ?? 0}회`}
-  />
+        <ResultCard
+          icon={<Slash />}
+          label="간투사 사용"
+          value={`${result?.features?.filler_count ?? 0}회`}
+        />
 
-  <ResultCard
-    icon={<PauseCircle />}
-    label="무음 비율"
-    value={`${((result?.features?.pause_ratio ?? 0) * 100).toFixed(1)}%`}
-  />
+        <ResultCard
+          icon={<PauseCircle />}
+          label="무음 비율"
+          value={`${((result?.features?.pause_ratio ?? 0) * 100).toFixed(1)}%`}
+        />
 
-  {/* 음색 안정성: MFCC 평균벡터/표준편차벡터의 평균값 요약 */}
-  <ResultCard
-    icon={<AudioLines />}
-    label="음색 안정성"
-    value={(() => {
-      const { mean, std } = getMFCCAvgTuple(result);
-      return (mean != null && std != null)
-        ? `${mean.toFixed(2)} / ${std.toFixed(2)}`
-        : "N/A";
-    })()}
-  />
-</div>
-
-
+        {/* 음색 안정성: MFCC 평균벡터/표준편차벡터의 평균값 요약 */}
+        <ResultCard
+          icon={<AudioLines />}
+          label="음색 안정성"
+          value={(() => {
+            const { mean, std } = getMFCCAvgTuple(result);
+            return (mean != null && std != null)
+              ? `${mean.toFixed(2)} / ${std.toFixed(2)}`
+              : "N/A";
+          })()}
+        />
+      </div>
 
       {/* 발표 특징 분석 */}
       <section id="analysis" className="py-10 -mx-4 sm:mx-0 bg-[#f8fafc]">
