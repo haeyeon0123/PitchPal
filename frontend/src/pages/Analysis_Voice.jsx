@@ -21,7 +21,6 @@ import { API_BASE } from '../config/apiEndpoints';
 const COLOR_PRIMARY   = '#5686C4';
 const COLOR_SECONDARY = '#826BC6';
 const COLOR_ACCENT    = '#3EB489';
-// 업로드 박스의 "분석 시작" 버튼은 요청사항대로 #6EAED5 사용
 const BUTTON_PRIMARY  = '#6EAED5';
 
 /* ======================= 유틸/더미 ======================= */
@@ -56,7 +55,7 @@ const playSegment = (audioRef, startSec, endSec) => {
   audio.addEventListener('timeupdate', handler);
 };
 
-// 5초 단위 더미 데이터 (응답 비어있을 때 가드용)
+// 5초 단위 더미 데이터
 const DUMMY_SEGMENTS = Array.from({ length: 12 }, (_, i) => ({
   time_range: `${(i * 5).toFixed(2)}-${((i + 1) * 5).toFixed(2)}`,
   wpm: 120 + Math.sin(i * 0.6) * 15 + (i % 5 === 3 ? 25 : 0),
@@ -75,7 +74,7 @@ const DUMMY_SILENCE = [
   { start_sec: 41, end_sec: 44 },
 ];
 
-// === KPI value helpers ===
+// === KPI helpers ===
 const pickNum = (...cands) => {
   for (const v of cands) if (Number.isFinite(v)) return v;
   return null;
@@ -154,7 +153,6 @@ function SilenceCard({ ratioPercent = 0 }) {
       />
     </div>
 
-    {/* 설명문구: 카드 맨 아래 고정 */}
     <p className="text-xs text-gray-600 mt-auto pt-2">
       긴 침묵은 줄이고, 짧게 멈추면 좋아요.
     </p>
@@ -173,7 +171,6 @@ function FillerCard({ items = [] }) {
         </span>
       </div>
 
-      {/* 총 사용 숫자와 '회' 통일 */}
       <div className="flex items-end gap-2 mb-2">
         <span className="text-3xl font-bold" style={{ color: COLOR_SECONDARY }}>
           {total}회
@@ -196,7 +193,6 @@ function FillerCard({ items = [] }) {
         <div className="text-sm text-gray-500">간투사 없음 🎉</div>
       )}
 
-      {/* 고정 멘트: 카드 하단 */}
       <p className="text-xs text-gray-600 mt-auto pt-2">
         간투사를 줄이면 메시지가 더 명확해져요.
       </p>
@@ -204,165 +200,77 @@ function FillerCard({ items = [] }) {
   );
 }
 
-/* ======================= API → UI 매핑 (service 응답 표준) ======================= */
-/**
- * 백엔드(/speech/analyze 또는 /speech/result) 응답 → 이 페이지에서 쓰는 형태로 변환
- */
+/* ======================= API → UI 매핑 ======================= */
 function mapServiceToUi(api) {
-  // ---------- 헬퍼 ----------
+  // ---- 기본 KPI ----
   const normProb = (v) => {
     const x = Number(v ?? 0);
     if (!Number.isFinite(x)) return 0;
-    // 0~1 또는 0~100 대응
-    return x > 1.5 ? x / 100 : x;
+    return x > 1.5 ? x / 100 : x; // 0~1 또는 0~100 수용
   };
-  const clamp = (v, lo = 0, hi = 1) => Math.max(lo, Math.min(hi, v));
-  const mean = (a) => (a && a.length ? a.reduce((x, y) => x + y, 0) / a.length : 0);
 
-  // ---------- 기본 KPI (영문/한글 키 모두 수용) ----------
   const pronunciation_accuracy = normProb(
     api?.pronunciation_accuracy ?? api?.["Pronunciation Accuracy"] ?? api?.발음_유사도_점수
   );
 
-  const wpm = Number(
-    api?.wpm ?? api?.WPM ?? 0
-  );
+  const wpm = Number(api?.wpm ?? api?.WPM ?? 0);
+  const pause_ratio = Number(api?.pause_ratio ?? api?.["Pause Ratio"] ?? api?.무음_구간_비율 ?? 0);
 
-  const pause_ratio = Number(
-    api?.pause_ratio ?? api?.["Pause Ratio"] ?? api?.무음_구간_비율 ?? 0
-  );
-
-  // ✅ 간투사 총합: filler.total > filler_count > "Filler Count"
+  // ✅ 간투사 총합: fillers_total > filler.total > filler_count
   const filler_count = Number(
-    (api?.filler && typeof api.filler.total !== 'undefined' ? api.filler.total : undefined)
-    ?? api?.filler_count
-    ?? api?.["Filler Count"]
-    ?? api?.간투사_수
-    ?? 0
+    api?.fillers_total ??
+    (api?.filler && typeof api.filler.total !== 'undefined' ? api.filler.total : undefined) ??
+    api?.filler_count ?? api?.["Filler Count"] ?? api?.간투사_수 ?? 0
   );
 
-  // ---------- 세그먼트/타임라인 ----------
+  // ---- 세그먼트: 백엔드 표준(seg.start_sec/end_sec/pitch_mean) 직접 사용 ----
   const segIn = Array.isArray(api?.segments) ? api.segments : [];
-  const pitchTL = Array.isArray(api?.pitch_timeline) ? api.pitch_timeline : [];
-  const mfccMeanGlobal =
-    Array.isArray(api?.mfcc_mean) ? api.mfcc_mean :
-    Array.isArray(api?.["MFCC Mean"]) ? api["MFCC Mean"] : [];
+  const stride = Number(api?.segment_stride_sec ?? 5);
 
-  const parseTimeRange = (rangeStr) => {
-    if (!rangeStr) return { start: 0, end: 0 };
-    const [s, e] = String(rangeStr).split(/[-~]/).map(t => parseFloat(t.replace(/[^\d.]/g, '')));
-    return { start: Math.min(s || 0, e || 0), end: Math.max(s || 0, e || 0) };
-  };
   const segments = segIn.length
-    ? segIn.map((s) => {
-        const start = Number(s.start_sec ?? s.start ?? parseTimeRange(s.time_range ?? '').start ?? 0);
-        const end   = Number(s.end_sec   ?? s.end   ?? parseTimeRange(s.time_range ?? '').end   ?? 0);
-        // 세그먼트 피치 평균 추정
-        const inRange = pitchTL.filter(p => Number(p.t) >= start && Number(p.t) <= end).map(p => Number(p.value));
-        let pitch_mean;
-        if (inRange.length) pitch_mean = mean(inRange);
-        else if (pitchTL.length) {
-          const mid = (start + end) / 2;
-          const nearest = pitchTL.reduce((best, cur) => {
-            const d = Math.abs(Number(cur.t) - mid);
-            return d < best.dist ? { dist: d, v: Number(cur.value) } : best;
-          }, { dist: Infinity, v: 0 });
-          pitch_mean = nearest.v;
-        } else { // 타임라인이 없으면 전역 평균으로라도
-          pitch_mean = Number(api?.pitch_mean ?? api?.["Pitch Mean"] ?? s.pitch_mean ?? 0);
-        }
+    ? segIn.map((s, i) => {
+        const start = Number(s.start_sec ?? s.start ?? parseTimeRange(s.time_range ?? '').start ?? i * stride);
+        const end   = Number(s.end_sec   ?? s.end   ?? parseTimeRange(s.time_range ?? '').end   ?? (start + stride));
+        const pmean =
+          Number.isFinite(s?.pitch_mean) ? Number(s.pitch_mean) :
+          (Number.isFinite(s?.pitch?.mean) ? Number(s.pitch.mean) :
+           Number.isFinite(s?.pitch?.avg)  ? Number(s.pitch.avg)  :
+           Number.isFinite(api?.pitch_mean) ? Number(api.pitch_mean) : 0);
         return {
           time_range: `${start.toFixed(2)}-${end.toFixed(2)}`,
-          wpm: Number(s.wpm ?? 0),
-          pitch_mean,
-          mfcc_mean: Array.isArray(s.mfcc_mean) ? s.mfcc_mean : mfccMeanGlobal,
+          wpm: Number(s.wpm ?? s.wpm_mean ?? s.wpmMean ?? 0),
+          pitch_mean: pmean,
+          mfcc_mean: Array.isArray(s.mfcc_mean) ? s.mfcc_mean : (Array.isArray(api?.mfcc_mean) ? api.mfcc_mean : []),
           fillers: s.fillers ?? [],
           silence: s.silence ?? [],
         };
       })
-    : Array.from({ length: 12 }, (_, i) => ({
-        time_range: `${(i * 5).toFixed(2)}-${((i + 1) * 5).toFixed(2)}`,
-        wpm: 120 + Math.sin(i * 0.6) * 15 + (i % 5 === 3 ? 25 : 0),
-        pitch_mean: 180 + Math.cos(i * 0.5) * 20 + (i % 7 === 4 ? -30 : 0),
-        mfcc_mean: Array.from({ length: 13 }, (_, k) => 10 + Math.sin(i * 0.5 + k * 0.2) * 2),
-        fillers: [],
-        silence: []
-      }));
+    : DUMMY_SEGMENTS;
 
-  // ---------- 침묵/간투사 (영문 키 흡수) ----------
+  // ---- 침묵/간투사 ----
   const silence = Array.isArray(api?.silence) ? api.silence.map(iv => ({
     start_sec: Number(iv.start_sec ?? iv.start ?? 0),
     end_sec:   Number(iv.end_sec   ?? iv.end   ?? 0),
   })) : [];
 
-  let fillers = [];
-  const occ = Array.isArray(api?.filler?.occurrences) ? api.filler.occurrences : null;
-
-  if (occ && occ.length) {
-    fillers = occ.map(o => {
-      if (Number.isFinite(o?.time)) {
-        return { time_sec: Number(o.time), word: String(o.type ?? o.word ?? 'F') };
-      }
-      const s = Number(o?.start ?? o?.start_sec), e = Number(o?.end ?? o?.end_sec ?? o?.start ?? o?.start_sec);
-      if (Number.isFinite(s) && Number.isFinite(e)) {
-        return { time_sec: (s + e) / 2, word: String(o.type ?? o.word ?? 'F') };
-      }
-      return null;
-    }).filter(Boolean);
-  } else if (Array.isArray(api?.fillers) && api.fillers.length) {
-    fillers = api.fillers
-      .map(f => {
-        const t = Number(f.time ?? f.time_sec ?? (Number.isFinite(f.start_sec) && Number.isFinite(f.end_sec) ? (f.start_sec + f.end_sec)/2 : NaN));
-        return Number.isFinite(t) ? { time_sec: t, word: f.token ?? f.word ?? 'F' } : null;
-      })
-      .filter(Boolean);
-  } else if (Array.isArray(api?.["Filler Words"]) && api["Filler Words"].length) {
-    // ✅ total_temp.py: [ (word, start, end), ... ]
-    fillers = api["Filler Words"]
-      .map(t => Array.isArray(t) && t.length >= 3
-        ? { time_sec: (Number(t[1]) + Number(t[2])) / 2, word: String(t[0]) }
-        : null)
-      .filter(Boolean);
-  }
-
-  // 유형별 집계
-  let fillerByType = null;
-  if (api?.filler?.by_type && typeof api.filler.by_type === 'object') {
+  // 유형별 집계: filler_words(객체) 우선 → filler.by_type → occurrences 집계
+  let fillerByType = [];
+  if (api?.filler_words && typeof api.filler_words === 'object') {
+    fillerByType = Object.entries(api.filler_words).map(([word, count]) => ({ word, count: Number(count || 0) }));
+  } else if (api?.filler?.by_type && typeof api.filler.by_type === 'object') {
     fillerByType = Object.entries(api.filler.by_type).map(([word, count]) => ({ word, count: Number(count || 0) }));
-  } else if (Array.isArray(api?.fillers_by_type)) { // 혹시 배열 형태라면
-    fillerByType = api.fillers_by_type.map(x => ({ word: String(x.word), count: Number(x.count || 0) }));
-  } else if (fillers.length) {
+  } else {
+    const occ = Array.isArray(api?.filler?.occurrences) ? api.filler.occurrences : [];
     const m = new Map();
-    fillers.forEach(f => m.set(String(f.word), (m.get(String(f.word)) || 0) + 1));
+    occ.forEach(o => m.set(String(o.type ?? o.word ?? '기타'), (m.get(String(o.type ?? o.word ?? '기타')) || 0) + 1));
     fillerByType = Array.from(m, ([word, count]) => ({ word, count }));
   }
 
-  // ---------- 레이더 점수 ----------
-  const pitchVals = pitchTL.map(p => Number(p.value)).filter(Number.isFinite);
-  const pitchStdFromTL = (() => {
-    if (pitchVals.length < 2) return 0;
-    const m = mean(pitchVals);
-    const v = mean(pitchVals.map(v => (v - m) ** 2));
-    return Math.sqrt(v);
-  })();
+  // ---- 레이더 스코어(0~5) ----
+  const pitchMeanGlobal = Number(api?.pitch_mean ?? api?.["Pitch 평균"] ?? NaN);
+  const pitchStdGlobal  = Number(api?.pitch_std  ?? api?.["Pitch 표준편차"] ?? NaN);
+  const mfccStdAvg = Array.isArray(api?.mfcc_std) ? mean(api.mfcc_std.map(Math.abs)) : 0;
 
-  // 전역 피치/음색(영문 키)도 확보
-  const _pitchMeanTop = Number(api?.["Pitch 평균"] ?? api?.avg_pitch_mean ?? api?.pitch_mean ?? api?.["Pitch Mean"] ?? NaN);
-  const _pitchStdTop  = Number(api?.["Pitch 표준편차"] ?? api?.avg_pitch_std ?? api?.pitch_std ?? api?.["Pitch Std"]  ?? NaN);
-  const _mfccMeanVec  = Array.isArray(api?.["MFCC 평균"]) ? api["MFCC 평균"]
-                        : Array.isArray(api?.mfcc_mean)    ? api.mfcc_mean
-                        : Array.isArray(api?.["MFCC Mean"]) ? api["MFCC Mean"] : [];
-  const _mfccStdVec   = Array.isArray(api?.["MFCC 표준편차"]) ? api["MFCC 표준편차"]
-                        : Array.isArray(api?.mfcc_std)          ? api.mfcc_std
-                        : Array.isArray(api?.["MFCC Std"])       ? api["MFCC Std"] : [];
-
-  let intonation5 = clamp((pitchStdFromTL / 80) * 5, 0, 5);
-  if ((!Number.isFinite(pitchStdFromTL) || pitchStdFromTL === 0) && Number.isFinite(_pitchStdTop)) {
-    // 타임라인이 없을 때 전역 표준편차로 대체
-    intonation5 = clamp((_pitchStdTop / 80) * 5, 0, 5);
-  }
-
-  const mfccStdAvg = _mfccStdVec.length ? mean(_mfccStdVec.map(Math.abs)) : 0;
   const speed5  = (() => {
     if (!Number.isFinite(wpm) || wpm <= 0) return 0;
     const target = 120, sigma = 40;
@@ -371,9 +279,9 @@ function mapServiceToUi(api) {
   })();
   const filler5 = clamp((10 - Math.min(10, filler_count)) / 10 * 5, 0, 5);
   const pause5  = clamp((1 - pause_ratio) * 5, 0, 5);
+  const intonation5 = Number.isFinite(pitchStdGlobal) ? clamp((pitchStdGlobal / 80) * 5, 0, 5) : 0;
   const mfcc5   = clamp((50 - Math.min(50, mfccStdAvg)) / 50 * 5, 0, 5);
 
-  // ---------- 반환(한글/영문 키 모두 제공) ----------
   return {
     scores: {
       pronunciation: clamp(pronunciation_accuracy * 5, 0, 5),
@@ -391,20 +299,20 @@ function mapServiceToUi(api) {
 
     segments,
     _globalSilence: silence,
-    _globalFillers: fillers,
+    _globalFillers: Array.isArray(api?.fillers) ? api.fillers.map(f => ({ time_sec: Number(f.time), word: String(f.token ?? f.word ?? 'F') })) : [],
     _fillerByType: fillerByType,
 
-    // KPI 블록 (프론트 다른 카드와의 호환 위해 한글 키도 심어둠)
+    // KPI 블록
     kpi: {
-      pitch_mean: Number.isFinite(_pitchMeanTop) ? _pitchMeanTop : null,
-      pitch_std:  Number.isFinite(_pitchStdTop)  ? _pitchStdTop  : null,
-      mfcc_mean:  _mfccMeanVec,
-      mfcc_std:   _mfccStdVec,
+      pitch_mean: Number.isFinite(pitchMeanGlobal) ? pitchMeanGlobal : null,
+      pitch_std:  Number.isFinite(pitchStdGlobal)  ? pitchStdGlobal  : null,
+      mfcc_mean:  Array.isArray(api?.mfcc_mean) ? api.mfcc_mean : [],
+      mfcc_std:   Array.isArray(api?.mfcc_std)  ? api.mfcc_std  : [],
     },
-    ["Pitch 평균"]:     Number.isFinite(_pitchMeanTop) ? _pitchMeanTop : null,
-    ["Pitch 표준편차"]: Number.isFinite(_pitchStdTop)  ? _pitchStdTop  : null,
-    ["MFCC 평균"]:      _mfccMeanVec,
-    ["MFCC 표준편차"]:  _mfccStdVec,
+    ["Pitch 평균"]:     Number.isFinite(pitchMeanGlobal) ? pitchMeanGlobal : null,
+    ["Pitch 표준편차"]: Number.isFinite(pitchStdGlobal)  ? pitchStdGlobal  : null,
+    ["MFCC 평균"]:      Array.isArray(api?.mfcc_mean) ? api.mfcc_mean : [],
+    ["MFCC 표준편차"]:  Array.isArray(api?.mfcc_std)  ? api.mfcc_std  : [],
   };
 }
 
@@ -457,14 +365,16 @@ export default function AnalysisVoice() {
         }
       );
 
-      // ✅ 분석 결과 표준 JSON(segments_results.json)을 백엔드 프록시로 재조회
-      //    경로 통일: /speech/segments-results  (하이픈 포함, /api 없음)
+      // ✅ 백엔드 표준 segments 결과 재조회 (정식 경로 우선)
       try {
-        const r = await fetch(`/speech/segments-results`, { cache: 'no-store' });
-        if (r.ok) {
-          const seg = await r.json();
+        let segResp = await fetch(`/api/speech/segments`, { cache: 'no-store' });
+        if (!segResp.ok) {
+          // 폴백: 예전 프록시 경로가 있을 때
+          segResp = await fetch(`/speech/segments-results`, { cache: 'no-store' });
+        }
+        if (segResp.ok) {
+          const seg = await segResp.json();
 
-          // 총합
           const total =
             typeof seg?.summary?.filler_count === 'number'
               ? seg.summary.filler_count
@@ -472,29 +382,8 @@ export default function AnalysisVoice() {
                   ? Object.values(seg.summary.fillers_by_type).reduce((a, b) => a + Number(b || 0), 0)
                   : 0);
 
-          // 유형별
           const byType = seg?.summary?.fillers_by_type || {};
-
-          // occurrences: 있으면 사용, 없으면 segments에서 생성
           let occurrences = Array.isArray(seg?.filler?.occurrences) ? seg.filler.occurrences : [];
-          if (!occurrences.length && Array.isArray(seg?.segments)) {
-            occurrences = seg.segments.flatMap((s) => {
-              const start = Number(s.start_sec ?? s.start ?? 0);
-              const end   = Number(s.end_sec   ?? s.end   ?? start);
-              const mid   = (start + end) / 2;
-              return (s.fillers || []).map((fv) => {
-                const word = String(fv?.word ?? fv?.token ?? fv?.type ?? 'F');
-                const tAbs = Number(fv?.time ?? fv?.time_sec);
-                if (Number.isFinite(tAbs)) return { time: tAbs, type: word };
-                const sr = Number(fv?.start_sec ?? fv?.start_rel ?? 0);
-                const er = Number(fv?.end_sec   ?? fv?.end_rel   ?? sr);
-                const t  = Number.isFinite(fv?.start_sec) || Number.isFinite(fv?.end_sec)
-                  ? (sr + er) / 2
-                  : mid + (sr + er) / 2;
-                return { time: t, type: word };
-              });
-            });
-          }
 
           api.filler = { total, by_type: byType, occurrences };
           api.filler_count = total;
@@ -572,7 +461,7 @@ export default function AnalysisVoice() {
           }}
         />
 
-        {/* 선택 버튼 2개 */}
+        {/* 선택 버튼 */}
         <div className="flex justify-center gap-4">
           <button
             onClick={() => audioInputRef.current?.click()}
@@ -710,7 +599,7 @@ function ResultSection({ result, audioUrl, audioRef, onReplay, onReload, radarDa
           value={`${((result?.features?.pause_ratio ?? 0) * 100).toFixed(1)}%`}
         />
 
-        {/* 음색 안정성: MFCC 평균벡터/표준편차벡터의 평균값 요약 */}
+        {/* 음색 안정성 */}
         <ResultCard
           icon={<AudioLines />}
           label="음색 안정성"
@@ -767,7 +656,6 @@ function ResultSection({ result, audioUrl, audioRef, onReplay, onReload, radarDa
             </ElevCard>
 
             <ElevCard className="p-5">
-              {/* 카드 상단에 최종 점수 크게 노출 */}
               <div className="text-center mb-4">
                 <div className="inline-flex items-center justify-center rounded-xl px-4 py-2 text-white text-lg font-bold"
                      style={{ backgroundColor: COLOR_SECONDARY }}>
@@ -775,7 +663,6 @@ function ResultSection({ result, audioUrl, audioRef, onReplay, onReload, radarDa
                 </div>
               </div>
 
-              {/* 피드백 */}
               {result?.feedback && (
                 <div className="mb-4 p-3 rounded-md border text-sm"
                      style={{ background: '#F6F5FF', borderColor: '#E7E4FF', color: '#4B3FA4' }}>
@@ -845,7 +732,7 @@ function ResultCard({ icon, label, value }) {
   );
 }
 
-/* ======================= 차트 블록 (Compact/Detailed) ======================= */
+/* ======================= 차트 블록 ======================= */
 function ChartsBlock({ result, audioRef }) {
   const [compact, setCompact] = useState(true);
 
@@ -901,11 +788,9 @@ function ChartsBlock({ result, audioRef }) {
   const pauseRatioPct = Number((result?.features?.pause_ratio ?? 0) * 100);
 
   const fillerItems = React.useMemo(() => {
-    // ✅ 백엔드(by_type) 집계가 있으면 그대로 사용
     if (Array.isArray(result?._fillerByType) && result._fillerByType.length) {
       return [...result._fillerByType].sort((a,b)=>b.count-a.count).slice(0, 6);
     }
-    // 없으면 occurrences로 폴백
     const m = new Map();
     (fillerOccurrences || []).forEach(f => {
       const w = String(f.word ?? '기타');
@@ -947,10 +832,7 @@ function ChartsBlock({ result, audioRef }) {
         <div className="space-y-8">
           <WPMChart segments={segments} band={[110, 160]} audioRef={audioRef} height={220} />
           <PitchChart segments={segments} bandScale={0.2} audioRef={audioRef} height={220} />
-
-          {/* 순서 변경: 음색(평균) → 침묵/간투사 카드 */}
           <MFCCOverall segments={segments} audioRef={audioRef} height={220} />
-
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
             <SilenceCard ratioPercent={pauseRatioPct} />
             <FillerCard items={fillerItems} />
