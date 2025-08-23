@@ -209,27 +209,55 @@ function FillerCard({ items = [] }) {
  * 백엔드(/speech/analyze 또는 /speech/result) 응답 → 이 페이지에서 쓰는 형태로 변환
  */
 function mapServiceToUi(api) {
-  const pronunciation_accuracy = Number(api?.pronunciation_accuracy ?? api?.발음_유사도_점수 ?? 0) / (api?.발음_유사도_점수 ? 100 : 1);
-  const wpm = Number(api?.wpm ?? 0);
-  const pause_ratio = Number(api?.pause_ratio ?? api?.무음_구간_비율 ?? 0);
+  // ---------- 헬퍼 ----------
+  const normProb = (v) => {
+    const x = Number(v ?? 0);
+    if (!Number.isFinite(x)) return 0;
+    // 0~1 또는 0~100 대응
+    return x > 1.5 ? x / 100 : x;
+  };
+  const clamp = (v, lo = 0, hi = 1) => Math.max(lo, Math.min(hi, v));
+  const mean = (a) => (a && a.length ? a.reduce((x, y) => x + y, 0) / a.length : 0);
 
-  // ✅ 간투사 총합: api.filler.total 우선
+  // ---------- 기본 KPI (영문/한글 키 모두 수용) ----------
+  const pronunciation_accuracy = normProb(
+    api?.pronunciation_accuracy ?? api?.["Pronunciation Accuracy"] ?? api?.발음_유사도_점수
+  );
+
+  const wpm = Number(
+    api?.wpm ?? api?.WPM ?? 0
+  );
+
+  const pause_ratio = Number(
+    api?.pause_ratio ?? api?.["Pause Ratio"] ?? api?.무음_구간_비율 ?? 0
+  );
+
+  // ✅ 간투사 총합: filler.total > filler_count > "Filler Count"
   const filler_count = Number(
     (api?.filler && typeof api.filler.total !== 'undefined' ? api.filler.total : undefined)
     ?? api?.filler_count
+    ?? api?.["Filler Count"]
     ?? api?.간투사_수
     ?? 0
   );
 
-  // 1) 세그먼트 변환: {start_sec,end_sec} 혹은 {time_range}
+  // ---------- 세그먼트/타임라인 ----------
   const segIn = Array.isArray(api?.segments) ? api.segments : [];
   const pitchTL = Array.isArray(api?.pitch_timeline) ? api.pitch_timeline : [];
-  const mfccMeanGlobal = Array.isArray(api?.mfcc_mean) ? api.mfcc_mean : [];
+  const mfccMeanGlobal =
+    Array.isArray(api?.mfcc_mean) ? api.mfcc_mean :
+    Array.isArray(api?.["MFCC Mean"]) ? api["MFCC Mean"] : [];
+
+  const parseTimeRange = (rangeStr) => {
+    if (!rangeStr) return { start: 0, end: 0 };
+    const [s, e] = String(rangeStr).split(/[-~]/).map(t => parseFloat(t.replace(/[^\d.]/g, '')));
+    return { start: Math.min(s || 0, e || 0), end: Math.max(s || 0, e || 0) };
+  };
   const segments = segIn.length
     ? segIn.map((s) => {
         const start = Number(s.start_sec ?? s.start ?? parseTimeRange(s.time_range ?? '').start ?? 0);
         const end   = Number(s.end_sec   ?? s.end   ?? parseTimeRange(s.time_range ?? '').end   ?? 0);
-        // 이 세그먼트 시간대의 피치 평균(없으면 가장 가까운 포인트)
+        // 세그먼트 피치 평균 추정
         const inRange = pitchTL.filter(p => Number(p.t) >= start && Number(p.t) <= end).map(p => Number(p.value));
         let pitch_mean;
         if (inRange.length) pitch_mean = mean(inRange);
@@ -240,8 +268,9 @@ function mapServiceToUi(api) {
             return d < best.dist ? { dist: d, v: Number(cur.value) } : best;
           }, { dist: Infinity, v: 0 });
           pitch_mean = nearest.v;
-        } else { pitch_mean = Number(s.pitch_mean ?? 0); }
-
+        } else { // 타임라인이 없으면 전역 평균으로라도
+          pitch_mean = Number(api?.pitch_mean ?? api?.["Pitch Mean"] ?? s.pitch_mean ?? 0);
+        }
         return {
           time_range: `${start.toFixed(2)}-${end.toFixed(2)}`,
           wpm: Number(s.wpm ?? 0),
@@ -251,24 +280,30 @@ function mapServiceToUi(api) {
           silence: s.silence ?? [],
         };
       })
-    : DUMMY_SEGMENTS;
+    : Array.from({ length: 12 }, (_, i) => ({
+        time_range: `${(i * 5).toFixed(2)}-${((i + 1) * 5).toFixed(2)}`,
+        wpm: 120 + Math.sin(i * 0.6) * 15 + (i % 5 === 3 ? 25 : 0),
+        pitch_mean: 180 + Math.cos(i * 0.5) * 20 + (i % 7 === 4 ? -30 : 0),
+        mfcc_mean: Array.from({ length: 13 }, (_, k) => 10 + Math.sin(i * 0.5 + k * 0.2) * 2),
+        fillers: [],
+        silence: []
+      }));
 
-  // 2) 전역 침묵/간투사 (우선순위: api.filler.occurrences > api.fillers > 세그먼트 보정)
-  const silence = Array.isArray(api?.silence) && api.silence.length
-    ? api.silence.map(iv => ({
-        start_sec: Number(iv.start ?? iv.start_sec ?? 0),
-        end_sec:   Number(iv.end   ?? iv.end_sec   ?? 0),
-      }))
-    : [];
+  // ---------- 침묵/간투사 (영문 키 흡수) ----------
+  const silence = Array.isArray(api?.silence) ? api.silence.map(iv => ({
+    start_sec: Number(iv.start_sec ?? iv.start ?? 0),
+    end_sec:   Number(iv.end_sec   ?? iv.end   ?? 0),
+  })) : [];
 
   let fillers = [];
   const occ = Array.isArray(api?.filler?.occurrences) ? api.filler.occurrences : null;
+
   if (occ && occ.length) {
     fillers = occ.map(o => {
       if (Number.isFinite(o?.time)) {
         return { time_sec: Number(o.time), word: String(o.type ?? o.word ?? 'F') };
       }
-      const s = Number(o?.start), e = Number(o?.end);
+      const s = Number(o?.start ?? o?.start_sec), e = Number(o?.end ?? o?.end_sec ?? o?.start ?? o?.start_sec);
       if (Number.isFinite(s) && Number.isFinite(e)) {
         return { time_sec: (s + e) / 2, word: String(o.type ?? o.word ?? 'F') };
       }
@@ -281,30 +316,54 @@ function mapServiceToUi(api) {
         return Number.isFinite(t) ? { time_sec: t, word: f.token ?? f.word ?? 'F' } : null;
       })
       .filter(Boolean);
+  } else if (Array.isArray(api?.["Filler Words"]) && api["Filler Words"].length) {
+    // ✅ total_temp.py: [ (word, start, end), ... ]
+    fillers = api["Filler Words"]
+      .map(t => Array.isArray(t) && t.length >= 3
+        ? { time_sec: (Number(t[1]) + Number(t[2])) / 2, word: String(t[0]) }
+        : null)
+      .filter(Boolean);
   }
 
-  // ✅ 유형별 집계: 있으면 그대로, 없으면 occurrences로 계산
+  // 유형별 집계
   let fillerByType = null;
-  if (api?.filler && api.filler.by_type && typeof api.filler.by_type === 'object') {
-    fillerByType = Object.entries(api.filler.by_type).map(([word, count]) => ({
-      word, count: Number(count || 0)
-    }));
+  if (api?.filler?.by_type && typeof api.filler.by_type === 'object') {
+    fillerByType = Object.entries(api.filler.by_type).map(([word, count]) => ({ word, count: Number(count || 0) }));
+  } else if (Array.isArray(api?.fillers_by_type)) { // 혹시 배열 형태라면
+    fillerByType = api.fillers_by_type.map(x => ({ word: String(x.word), count: Number(x.count || 0) }));
   } else if (fillers.length) {
     const m = new Map();
-    fillers.forEach(f => m.set(f.word, (m.get(f.word) || 0) + 1));
+    fillers.forEach(f => m.set(String(f.word), (m.get(String(f.word)) || 0) + 1));
     fillerByType = Array.from(m, ([word, count]) => ({ word, count }));
   }
 
-  // 3) 레이더 차트용 점수(0~5) — 휴리스틱
+  // ---------- 레이더 점수 ----------
   const pitchVals = pitchTL.map(p => Number(p.value)).filter(Number.isFinite);
-  const pitchStd = (() => {
+  const pitchStdFromTL = (() => {
     if (pitchVals.length < 2) return 0;
     const m = mean(pitchVals);
     const v = mean(pitchVals.map(v => (v - m) ** 2));
     return Math.sqrt(v);
   })();
-  const intonation5 = clamp(pitchStd / 80 * 5, 0, 5);
-  const speed5 = (() => {
+
+  // 전역 피치/음색(영문 키)도 확보
+  const _pitchMeanTop = Number(api?.["Pitch 평균"] ?? api?.avg_pitch_mean ?? api?.pitch_mean ?? api?.["Pitch Mean"] ?? NaN);
+  const _pitchStdTop  = Number(api?.["Pitch 표준편차"] ?? api?.avg_pitch_std ?? api?.pitch_std ?? api?.["Pitch Std"]  ?? NaN);
+  const _mfccMeanVec  = Array.isArray(api?.["MFCC 평균"]) ? api["MFCC 평균"]
+                        : Array.isArray(api?.mfcc_mean)    ? api.mfcc_mean
+                        : Array.isArray(api?.["MFCC Mean"]) ? api["MFCC Mean"] : [];
+  const _mfccStdVec   = Array.isArray(api?.["MFCC 표준편차"]) ? api["MFCC 표준편차"]
+                        : Array.isArray(api?.mfcc_std)          ? api.mfcc_std
+                        : Array.isArray(api?.["MFCC Std"])       ? api["MFCC Std"] : [];
+
+  let intonation5 = clamp((pitchStdFromTL / 80) * 5, 0, 5);
+  if ((!Number.isFinite(pitchStdFromTL) || pitchStdFromTL === 0) && Number.isFinite(_pitchStdTop)) {
+    // 타임라인이 없을 때 전역 표준편차로 대체
+    intonation5 = clamp((_pitchStdTop / 80) * 5, 0, 5);
+  }
+
+  const mfccStdAvg = _mfccStdVec.length ? mean(_mfccStdVec.map(Math.abs)) : 0;
+  const speed5  = (() => {
     if (!Number.isFinite(wpm) || wpm <= 0) return 0;
     const target = 120, sigma = 40;
     const z = Math.exp(-((wpm - target) ** 2) / (2 * sigma ** 2));
@@ -312,28 +371,10 @@ function mapServiceToUi(api) {
   })();
   const filler5 = clamp((10 - Math.min(10, filler_count)) / 10 * 5, 0, 5);
   const pause5  = clamp((1 - pause_ratio) * 5, 0, 5);
-  const mfccStd = Array.isArray(api?.mfcc_std) ? api.mfcc_std : [];
-  const mfccStdAvg = mfccStd.length ? mean(mfccStd.map(Math.abs)) : 0;
   const mfcc5   = clamp((50 - Math.min(50, mfccStdAvg)) / 50 * 5, 0, 5);
 
-  // === [ADD] KPI용 전역 Pitch/MFCC 값 확보 ===
-  const _pitchMeanTop = Number(
-    api?.["Pitch 평균"] ?? api?.avg_pitch_mean ?? api?.pitch_mean ?? NaN
-  );
-  const _pitchStdTop  = Number(
-    api?.["Pitch 표준편차"] ?? api?.avg_pitch_std ?? api?.pitch_std ?? NaN
-  );
-  const _mfccMeanVec =
-    Array.isArray(api?.["MFCC 평균"]) ? api["MFCC 평균"]
-    : Array.isArray(api?.mfcc_mean)     ? api.mfcc_mean
-    : [];
-  const _mfccStdVec  =
-    Array.isArray(api?.["MFCC 표준편차"]) ? api["MFCC 표준편차"]
-    : Array.isArray(api?.mfcc_std)         ? api.mfcc_std
-    : [];
-
+  // ---------- 반환(한글/영문 키 모두 제공) ----------
   return {
-    // === 기존 필드 유지 ===
     scores: {
       pronunciation: clamp(pronunciation_accuracy * 5, 0, 5),
       intonation:    intonation5,
@@ -342,33 +383,31 @@ function mapServiceToUi(api) {
       pause:         pause5,
       mfcc:          mfcc5,
     },
-    // ✅ KPI 카드가 filler_count(=filler.total)을 쓰도록
     features: { pronunciation_accuracy, wpm, filler_count, pause_ratio },
 
-    feedback: api?.feedback_text || "분석 결과를 불러왔습니다. 상세 항목을 확인해 보세요.",
+    feedback: api?.feedback_text || api?.feedback || "분석 결과를 불러왔습니다. 상세 항목을 확인해 보세요.",
     feedback_bullets: Array.isArray(api?.feedback_bullets) ? api.feedback_bullets : [],
     stt_html_url: api?.stt_result_url || api?.stt_results_url || null,
 
     segments,
     _globalSilence: silence,
-    _globalFillers: fillers,      // 타임라인 점 찍기용
-    _fillerByType: fillerByType,  // 간투사 카드에서 사용
+    _globalFillers: fillers,
+    _fillerByType: fillerByType,
 
-    // === [ADD-1] KPI 블록: 카드/헬퍼 고정 경로 ===
+    // KPI 블록 (프론트 다른 카드와의 호환 위해 한글 키도 심어둠)
     kpi: {
       pitch_mean: Number.isFinite(_pitchMeanTop) ? _pitchMeanTop : null,
       pitch_std:  Number.isFinite(_pitchStdTop)  ? _pitchStdTop  : null,
       mfcc_mean:  _mfccMeanVec,
       mfcc_std:   _mfccStdVec,
     },
-
-    // === [ADD-2] 한글 키도 그대로 노출 (기존 카드 호환) ===
     ["Pitch 평균"]:     Number.isFinite(_pitchMeanTop) ? _pitchMeanTop : null,
     ["Pitch 표준편차"]: Number.isFinite(_pitchStdTop)  ? _pitchStdTop  : null,
     ["MFCC 평균"]:      _mfccMeanVec,
     ["MFCC 표준편차"]:  _mfccStdVec,
   };
 }
+
 
 /* ======================= 메인 페이지 ======================= */
 export default function AnalysisVoice() {
@@ -418,16 +457,49 @@ export default function AnalysisVoice() {
         }
       );
 
-      // 분석 결과 표준 JSON(segments_results.json)을 API로 한번 더 조회
+      // ✅ 분석 결과 표준 JSON(segments_results.json)을 백엔드 프록시로 재조회
+      //    경로 통일: /speech/segments-results  (하이픈 포함, /api 없음)
       try {
-        const r = await fetch(`${API_BASE}/api/speech/segments`, { cache: 'no-store' });
+        const r = await fetch(`/speech/segments-results`, { cache: 'no-store' });
         if (r.ok) {
           const seg = await r.json();
-          if (seg?.filler) {
-            api.filler = seg.filler; // { total, by_type, occurrences }
+
+          // 총합
+          const total =
+            typeof seg?.summary?.filler_count === 'number'
+              ? seg.summary.filler_count
+              : (seg?.summary?.fillers_by_type
+                  ? Object.values(seg.summary.fillers_by_type).reduce((a, b) => a + Number(b || 0), 0)
+                  : 0);
+
+          // 유형별
+          const byType = seg?.summary?.fillers_by_type || {};
+
+          // occurrences: 있으면 사용, 없으면 segments에서 생성
+          let occurrences = Array.isArray(seg?.filler?.occurrences) ? seg.filler.occurrences : [];
+          if (!occurrences.length && Array.isArray(seg?.segments)) {
+            occurrences = seg.segments.flatMap((s) => {
+              const start = Number(s.start_sec ?? s.start ?? 0);
+              const end   = Number(s.end_sec   ?? s.end   ?? start);
+              const mid   = (start + end) / 2;
+              return (s.fillers || []).map((fv) => {
+                const word = String(fv?.word ?? fv?.token ?? fv?.type ?? 'F');
+                const tAbs = Number(fv?.time ?? fv?.time_sec);
+                if (Number.isFinite(tAbs)) return { time: tAbs, type: word };
+                const sr = Number(fv?.start_sec ?? fv?.start_rel ?? 0);
+                const er = Number(fv?.end_sec   ?? fv?.end_rel   ?? sr);
+                const t  = Number.isFinite(fv?.start_sec) || Number.isFinite(fv?.end_sec)
+                  ? (sr + er) / 2
+                  : mid + (sr + er) / 2;
+                return { time: t, type: word };
+              });
+            });
           }
-          if (seg?.summary?.filler_count != null) api.filler_count = seg.summary.filler_count;
+
+          api.filler = { total, by_type: byType, occurrences };
+          api.filler_count = total;
           if (Array.isArray(seg?.silence)) api.silence = seg.silence;
+          if (Array.isArray(seg?.segments) && !api.segments) api.segments = seg.segments;
         }
       } catch (_) {}
 

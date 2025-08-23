@@ -120,8 +120,6 @@ SPEECH_RESULT_ROOT.mkdir(parents=True, exist_ok=True)
 app.mount("/static", StaticFiles(directory=str(CONTENT_RESULT_ROOT)), name="static")
 
 # - 음성 분석 결과 (두 개의 alias 제공)
-#   1) /static-speech (기존 유지)
-#   2) /model/speech/results (프론트에서 그대로 열 수 있도록)
 app.mount("/static-speech", StaticFiles(directory=str(SPEECH_RESULT_ROOT)), name="static-speech")
 app.mount("/model/speech/results", StaticFiles(directory=str(SPEECH_RESULT_ROOT)), name="speech-results-alias")
 
@@ -252,11 +250,15 @@ class SpeechAnalysisResponse(BaseModel):
     feedback_text: str = ""
     stt_results_url: Optional[str] = None
     analysis_mode: str = "audio+script"
-    # 전역 타임라인(옵션 B)
+    # 전역 타임라인
     fillers: List[Dict[str, Any]] = Field(default_factory=list)   # [{token, time}]
     silence: List[Dict[str, float]] = Field(default_factory=list) # [{start,end}]
-    # ✅ 추가: KPI/카드 공통 소스
+    # KPI/카드 공통 소스
     filler: Dict[str, Any] = Field(default_factory=dict)          # {"total":int,"by_type":{},"occurrences":[...]}
+    # === (추가) 프론트 호환 필드 보장 ===
+    filler_words: Dict[str, int] = Field(default_factory=dict)    # {"어":1,"음":2,...}
+    fillers_total: int = 0
+    segment_stride_sec: Optional[float] = None
 
 # -----------------------------------------------------
 # 기존 엔드포인트 (내용분석)
@@ -280,7 +282,6 @@ async def evaluate(body: EvaluateBody):
         evaluator = SpeechEvaluator().load_model("model/evaluation")
     with stage("evaluation_predict"):
         scores_df, cluster = evaluator.predict_from_features(body.features)
-    # ← 월러스 연산자 제거: 먼저 변수에 담아 사용
     scores_dict = scores_df.to_dict(orient="records")[0]
     return {
         "scores": scores_dict,
@@ -467,9 +468,13 @@ def _fallback_speech_result(audio_path: Path, script_path: Optional[Path]) -> Sp
         fillers=[{"token":"어","time":7.6},{"token":"음","time":12.1}],
         silence=[{"start":11.0,"end":12.2}],
         filler={"total":6,"by_type":{"어":1,"음":1},"occurrences":[{"type":"어","time":7.6},{"type":"음","time":12.1}]},
+        filler_words={"어":1,"음":1},
+        fillers_total=6,
+        segment_stride_sec=5.0,
     )
 
 def _map_speech_raw_to_response(raw: Dict[str, Any]) -> SpeechAnalysisResponse:
+    # ----- 전역 KPI -----
     pron_acc_pct = float(raw.get("발음 유사도 점수", raw.get("pronunciation_accuracy", 0.0)))
     pron_acc = pron_acc_pct / (100.0 if pron_acc_pct > 1.0 else 1.0)
 
@@ -485,16 +490,16 @@ def _map_speech_raw_to_response(raw: Dict[str, Any]) -> SpeechAnalysisResponse:
     # STT HTML 경로 보정
     stt_url = raw.get("stt_result_url") or raw.get("stt_results_url")
     if stt_url:
-        # 파일명만 들어오면 alias로 보정
         name = Path(str(stt_url)).name
         stt_url = f"/model/speech/results/{name}"
     else:
         candidate = SPEECH_RESULT_ROOT / "stt_results.html"
         stt_url = f"/model/speech/results/{candidate.name}" if candidate.exists() else None
 
-    # 세그먼트 정규화 + 전역 이벤트
+    # ----- 세그먼트 정규화 + 전역 이벤트 -----
     segments_norm: List[Segment] = []
-    global_fillers: List[Dict[str, Any]] = []
+    starts: List[float] = []
+    occurrences_global: List[Dict[str, Any]] = []
     global_silence: List[Dict[str, float]] = []
 
     for seg in raw.get("segments", []) or []:
@@ -504,13 +509,14 @@ def _map_speech_raw_to_response(raw: Dict[str, Any]) -> SpeechAnalysisResponse:
                 parsed = _parse_time_range_to_secs(seg["time_range"])
                 if parsed: s, e = parsed
             else:
-                s = float(seg.get("start_sec", 0.0)); e = float(seg.get("end_sec", 0.0))
+                s = float(seg.get("start_sec", seg.get("startSec", 0.0)))
+                e = float(seg.get("end_sec", seg.get("endSec", 0.0)))
 
             # per-seg fillers: (word, abs_start, abs_end) → 전역 이벤트(time=중앙)
             for f in seg.get("fillers", []) or []:
                 try:
                     token, fs, fe = f[0], float(f[1]), float(f[2])
-                    global_fillers.append({"token": token, "time": (fs + fe) / 2.0})
+                    occurrences_global.append({"token": token, "time": (fs + fe) / 2.0})
                 except Exception:
                     pass
 
@@ -522,19 +528,33 @@ def _map_speech_raw_to_response(raw: Dict[str, Any]) -> SpeechAnalysisResponse:
                 except Exception:
                     pass
 
+            # ---- 핵심: pitch_mean 다양한 키 지원 ----
+            pitch_seg = seg.get("pitch_mean")
+            if pitch_seg is None and isinstance(seg.get("pitch"), dict):
+                p = seg["pitch"]
+                pitch_seg = p.get("mean", p.get("avg", p.get("avg_hz")))
+
             segments_norm.append(Segment(
                 start_sec=s, end_sec=e,
-                wpm=seg.get("wpm"),
-                pitch_mean=seg.get("pitch_mean"),
+                wpm=seg.get("wpm") or seg.get("wpm_mean") or seg.get("wpmMean"),
+                pitch_mean=(None if pitch_seg is None else float(pitch_seg)),
                 pitch_std=None,
                 has_filler=bool(seg.get("fillers")),
                 is_pause=bool(seg.get("silence")),
                 mfcc_mean=seg.get("mfcc_mean"),
             ))
+            starts.append(s)
         else:
             segments_norm.append(Segment(start_sec=0.0, end_sec=5.0))
 
-    # === (NEW) 간투사 단일 소스 만들기
+    # stride 추정 (세그먼트 시작간 최소 양의 차)
+    stride = None
+    if len(starts) >= 2:
+        diffs = sorted({round(b - a, 3) for a, b in zip(starts, starts[1:]) if (b - a) > 0})
+        if diffs:
+            stride = float(diffs[0])
+
+    # === (NEW) 간투사 단일 소스 만들기 ===
     raw_fw = raw.get("Filler Words") or raw.get("filler_words") or raw.get("filler_occurrences") or []
     occurrences: List[Dict[str, Any]] = []
     by_type: Dict[str, int] = {}
@@ -544,7 +564,6 @@ def _map_speech_raw_to_response(raw: Dict[str, Any]) -> SpeechAnalysisResponse:
             try:
                 t, s2, e2 = it[0], float(it[1]), float(it[2])
             except Exception:
-                # dict 형태 허용
                 t = it.get("type") or it.get("token") or it.get("word")
                 s2 = float(it.get("start", it.get("start_sec", 0.0)))
                 e2 = float(it.get("end", it.get("end_sec", 0.0)))
@@ -584,6 +603,9 @@ def _map_speech_raw_to_response(raw: Dict[str, Any]) -> SpeechAnalysisResponse:
         "mfcc": 8.0,
     }
 
+    # === (추가) 프론트 호환 키 동시 제공 ===
+    filler_words_map = {str(k): int(v) for k, v in by_type.items()} if by_type else {}
+
     return SpeechAnalysisResponse(
         pronunciation_accuracy=pron_acc,
         wpm=wpm,
@@ -601,6 +623,9 @@ def _map_speech_raw_to_response(raw: Dict[str, Any]) -> SpeechAnalysisResponse:
         fillers=[{"token": o["type"], "time": o.get("time", o["start"])} for o in occurrences],
         silence=[],
         filler={"total": filler_total, "by_type": by_type, "occurrences": occurrences},
+        filler_words=filler_words_map,
+        fillers_total=filler_total,
+        segment_stride_sec=stride,
     )
 
 # -----------------------------------------------------
@@ -786,7 +811,6 @@ def get_latest_speech_result():
         if not htmls:
             raise HTTPException(status_code=404, detail="결과 HTML이 없습니다.")
         latest = htmls[0].name
-    # 프론트가 그대로 열 수 있는 alias 경로로 리다이렉트
     return RedirectResponse(url=f"/model/speech/results/{latest}", status_code=302)
 
 # -----------------------------------------------------
