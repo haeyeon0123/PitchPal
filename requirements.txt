@@ -9,9 +9,10 @@ uvicorn
 python-multipart
 urllib3
 opencv-python
-numpy==1.23.5
+Keras==2.3.1
+numpy==1.17.4
 imutils==0.5.3
-scikit-learn==1.2.2
+scikit-learn==0.22.1
 openai
 python-dotenv
 faster-whisper
@@ -19,3 +20,4 @@ pydub
 librosa
 pandas
 joblib
+tensorflow==2.2.0

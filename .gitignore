@@ -35,3 +35,4 @@ dist/
 build/
 frontend/dist/
 frontend/build/
+".venv38/" 
