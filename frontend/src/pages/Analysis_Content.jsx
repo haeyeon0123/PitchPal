@@ -1,4 +1,4 @@
-// 내용 분석 페이지 (백엔드 연동 완료, 레이더차트만 연동하면 됨)
+// 내용 분석 페이지 (백엔드 연동 + 레이더차트 점수 연동 안정판)
 
 import React, { useMemo, useRef, useState, useEffect } from 'react';
 import axios from 'axios';
@@ -11,26 +11,34 @@ import {
 } from 'recharts';
 
 // ===================== 환경 설정(CRA/Vite 공통) =====================
-const API_BASE =
-  (typeof process !== 'undefined' &&
-    process.env &&
-    process.env.REACT_APP_API_BASE &&
-    process.env.REACT_APP_API_BASE.replace(/\/+$/, '')) ||
-  'http://localhost:8000';
+const API_BASE = (() => {
+  const vite = (typeof import.meta !== 'undefined'
+    && import.meta.env
+    && import.meta.env.VITE_API_BASE
+    && String(import.meta.env.VITE_API_BASE).replace(/\/+$/, ''));
+  if (vite) return vite;
+
+  const cra = (typeof process !== 'undefined'
+    && process.env
+    && process.env.REACT_APP_API_BASE
+    && String(process.env.REACT_APP_API_BASE).replace(/\/+$/, ''));
+  if (cra) return cra;
+
+  return 'http://localhost:8000';
+})();
 
 // 상대경로 html_url을 절대경로로 보정 (선택)
-const resolveUrl = (u) => {
+function resolveUrl(u) {
   if (!u) return '';
   if (u.startsWith('http://') || u.startsWith('https://')) return u;
-  return `${API_BASE}${u.startsWith('/') ? u : `/${u}`}`;
-};
+  return `${API_BASE}${u.startsWith('/') ? u : '/' + u}`;
+}
 
 // 프론트 UI 색상
 const COLOR_PRIMARY = '#6EAED5';   // 교정문 복사 버튼
 const COLOR_SECONDARY = '#A68ED5'; // 분석 시작/링크 버튼
 
 // ===================== 보조 유틸 =====================
-// 서버가 "강조 HTML"을 안 주는 경우 대비한 간단 하이라이트(옵션)
 function naiveHighlight(original = '', corrected = '') {
   if (!original || !corrected) return corrected;
   try {
@@ -45,7 +53,7 @@ function naiveHighlight(original = '', corrected = '') {
           map.set(w, left - 1);
           return w;
         }
-        return `<span style="color:red;font-weight:bold;">${w}</span>`;
+        return '<span style="color:red;font-weight:bold;">' + w + '</span>';
       })
       .join(' ');
   } catch {
@@ -53,43 +61,58 @@ function naiveHighlight(original = '', corrected = '') {
   }
 }
 
-// 강조된 단어(span style="color:red") 개수를 세어 오류/수정 개수 근사치로 사용
 function countHighlightedSpans(html = '') {
   return (html.match(/<span[^>]*style=["'][^"']*color:\s*red/gi) || []).length;
 }
 
 // ===================== 컴포넌트 =====================
 export default function Analysis_Content() {
-  // === [업로드 박스] ===
+  // 업로드
   const scriptInputRef = useRef(null);
   const [fileInfo, setFileInfo] = useState({ script: null });
 
   // 요청/응답 상태
   const [loading, setLoading] = useState(false);
-  const [progress, setProgress] = useState(0);                  // [PROGRESS] 서버 진행률 %
-  const [progressMessage, setProgressMessage] = useState('');   // [PROGRESS] 서버 메시지
+  const [progress, setProgress] = useState(0);
+  const [progressMessage, setProgressMessage] = useState('');
   const [error, setError] = useState(null);
 
-  // 결과 데이터
+  // 결과
   const [originalText, setOriginalText] = useState('');
   const [correctedText, setCorrectedText] = useState('');
-  const [highlightedHtml, setHighlightedHtml] = useState(''); // 서버가 준 강조 HTML(또는 폴백)
-  const [feedbackText, setFeedbackText] = useState('');       // AI 피드백 텍스트(옵션)
-  const [htmlUrl, setHtmlUrl] = useState('');                 // corrected_result.html 접근 URL
+  const [highlightedHtml, setHighlightedHtml] = useState('');
+  const [feedbackText, setFeedbackText] = useState('');
+  const [htmlUrl, setHtmlUrl] = useState('');
 
-  // 탭 상태
+  // ✅ 백엔드 점수(한글 키)
+  const [scores, setScores] = useState(null);
+
+  // 탭
   const [tab, setTab] = useState('original'); // 'original' | 'corrected'
 
   // 간단 통계
   const stats = useMemo(() => {
     const wc = correctedText ? correctedText.trim().split(/\s+/).filter(Boolean).length : 0;
     const errorCount = countHighlightedSpans(highlightedHtml);
-    const avgErrors = wc > 0 ? errorCount / Math.max(1, Math.round(wc / 20)) : 0; // 문장 20단어 가정
+    const avgErrors = wc > 0 ? errorCount / Math.max(1, Math.round(wc / 20)) : 0;
     return { wordCount: wc, errorCount, avgErrors: Number(avgErrors.toFixed(2)) };
   }, [correctedText, highlightedHtml]);
 
-  // 레이더(임시) - 시연용 계산치
+  // ✅ 레이더 데이터 (scores 있으면 실점수, 없으면 임시값)
   const radarData = useMemo(() => {
+    const clamp10 = (n) => Math.max(0, Math.min(10, Number(n) || 0));
+    const ORDER = ['논리성', '구조화', '간결성', '전달력', '일관성'];
+    const hasScores = scores && typeof scores === 'object' && Object.keys(scores).length > 0;
+
+    if (hasScores) {
+      return ORDER.map((k) => ({
+        subject: k,
+        A: clamp10(scores[k]),
+        fullMark: 10,
+      }));
+    }
+
+    // (폴백) 임시 계산치
     const penalty = Math.min(10, countHighlightedSpans(highlightedHtml) / 5);
     const base = 8.5 - penalty * 0.5;
     const clamp = (n) => Math.max(0, Math.min(10, n));
@@ -100,12 +123,12 @@ export default function Analysis_Content() {
       { subject: '전달력', A: clamp(base + 0.1), fullMark: 10 },
       { subject: '일관성', A: clamp(base),       fullMark: 10 },
     ];
-  }, [highlightedHtml]);
+  }, [scores, highlightedHtml]);
 
-  // 언마운트 시 폴링 정리
+  // 언마운트 시 폴링 정리 (보조)
   useEffect(() => {
     return () => {
-      // 컴포넌트가 사라질 때 setInterval 정리 (handleRun 내부에서 관리하므로 여기선 보조용)
+      // setInterval 정리(안전장치) — handleRun 안에서도 정리함
     };
   }, []);
 
@@ -121,11 +144,12 @@ export default function Analysis_Content() {
     setHighlightedHtml('');
     setFeedbackText('');
     setHtmlUrl('');
+    setScores(null);
     setTab('original');
     if (scriptInputRef.current) scriptInputRef.current.value = '';
   };
 
-  // === [PROGRESS] 업로드 & 실행: /content/start → /content/progress → /content/result ===
+  // === 실행: /content/start → /content/progress → /content/result ===
   const handleRun = async () => {
     setError(null);
 
@@ -141,88 +165,85 @@ export default function Analysis_Content() {
       setProgress(0);
       setProgressMessage('준비 중…');
 
-      // 파일 → 텍스트
+      // 파일 → 문자열
       let scriptText = '';
       if (fileInfo.script instanceof File) {
-        scriptText = await fileInfo.script.text();  // 파일 → 문자열
+        scriptText = await fileInfo.script.text();
       } else if (typeof fileInfo.script === 'string') {
         scriptText = fileInfo.script;
       }
 
-      // 1) 작업 시작 → job_id 수신
+      // 1) 작업 시작
       const startRes = await axios.post(`${API_BASE}/content/start`, { script: scriptText });
-      const jobId = startRes?.data?.job_id;
-      if (!jobId) {
-        throw new Error('job_id를 받지 못했습니다.');
-      }
+      const jobId = startRes && startRes.data && startRes.data.job_id;
+      if (!jobId) throw new Error('job_id를 받지 못했습니다.');
 
       // 2) 진행률 폴링
       await new Promise((resolve, reject) => {
         const startedAt = Date.now();
         pollId = setInterval(async () => {
           try {
-            const { data: p } = await axios.get(`${API_BASE}/content/progress/${jobId}`);
-            // p: { job_id, progress, status, message }
-            if (typeof p?.progress === 'number') setProgress(p.progress);
-            if (p?.message) setProgressMessage(p.message);
+            const resp = await axios.get(`${API_BASE}/content/progress/${jobId}`);
+            const p = resp.data;
+            if (typeof p.progress === 'number') setProgress(p.progress);
+            if (p.message) setProgressMessage(p.message);
 
-            if (p?.status === 'error') {
-              clearInterval(pollId);
-              pollId = null;
-              reject(new Error(p?.message || '서버 에러'));
+            if (p.status === 'error') {
+              clearInterval(pollId); pollId = null;
+              reject(new Error(p.message || '서버 에러'));
               return;
             }
-            if (p?.status === 'done' && (p?.progress ?? 0) >= 100) {
-              clearInterval(pollId);
-              pollId = null;
+            if (p.status === 'done' && (p.progress ?? 0) >= 100) {
+              clearInterval(pollId); pollId = null;
               resolve(null);
               return;
             }
 
             // 안전장치: 10분 초과 시 중단
             if (Date.now() - startedAt > 10 * 60 * 1000) {
-              clearInterval(pollId);
-              pollId = null;
+              clearInterval(pollId); pollId = null;
               reject(new Error('타임아웃(10분)'));
             }
           } catch (e) {
-            clearInterval(pollId);
-            pollId = null;
+            clearInterval(pollId); pollId = null;
             reject(e);
           }
-        }, 500); // 0.5초 폴링
+        }, 500);
       });
 
-      // 3) 최종 결과 조회
+      // 3) 결과 조회
       const { data } = await axios.get(`${API_BASE}/content/result/${jobId}`);
 
-      setHtmlUrl(resolveUrl(data?.html_url || ''));
-      setOriginalText(data?.original_text || '');
-      setCorrectedText(data?.corrected_text || '');
+      setHtmlUrl(resolveUrl(data && data.html_url ? data.html_url : ''));
+      setOriginalText((data && data.original_text) || '');
+      setCorrectedText((data && data.corrected_text) || '');
 
-      if (data?.highlighted_html) {
+      if (data && data.highlighted_html) {
         setHighlightedHtml(data.highlighted_html);
-      } else if (data?.original_text && data?.corrected_text) {
+      } else if (data && data.original_text && data.corrected_text) {
         setHighlightedHtml(naiveHighlight(data.original_text, data.corrected_text));
       } else {
         setHighlightedHtml('');
       }
 
-      setFeedbackText(data?.feedback_text || '');
+      // ✅ AI 내용 피드백 복구
+      setFeedbackText((data && data.feedback_text) || '');
+
+      // ✅ 점수 반영 (빈 객체면 null 처리)
+      const s = data && data.scores;
+      setScores(s && typeof s === 'object' && Object.keys(s).length > 0 ? s : null);
+
       setProgress(100);
       setProgressMessage('완료');
     } catch (err) {
       console.error(err);
-      if (err?.response) {
-        setError(`서버 오류(${err.response.status}): ${err.response.data?.detail || '자세한 로그를 확인하세요.'}`);
+      if (err && err.response) {
+        setError(`서버 오류(${err.response.status}): ${err.response.data && err.response.data.detail ? err.response.data.detail : '자세한 로그를 확인하세요.'}`);
       } else {
-        setError(err?.message || '네트워크/CORS 문제일 수 있어요. FastAPI CORS를 확인해주세요.');
+        setError((err && err.message) || '네트워크/CORS 문제일 수 있어요. FastAPI CORS를 확인해주세요.');
       }
     } finally {
-      if (pollId) {
-        clearInterval(pollId);
-        pollId = null;
-      }
+      if (pollId) { clearInterval(pollId); pollId = null; }
       setLoading(false);
     }
   };
@@ -236,6 +257,8 @@ export default function Analysis_Content() {
       alert('복사에 실패했어요. 브라우저 권한을 확인해주세요.');
     }
   };
+
+  const hasScores = scores && typeof scores === 'object' && Object.keys(scores).length > 0;
 
   return (
     <div className="mx-auto w-full p-8 space-y-10 max-w-[1400px]">
@@ -252,15 +275,17 @@ export default function Analysis_Content() {
           ref={scriptInputRef}
           className="hidden"
           onChange={(e) => {
-            const file = e.target.files?.[0];
+            const file = e.target.files && e.target.files[0];
             if (file) setFileInfo((prev) => ({ ...prev, script: file }));
           }}
         />
 
-        {/* 버튼 (라운드형, 흰색, 보더) */}
+        {/* 버튼 */}
         <div className="flex justify-center gap-4">
           <button
-            onClick={() => scriptInputRef.current?.click()}
+            onClick={() => {
+              if (scriptInputRef.current) scriptInputRef.current.click();
+            }}
             className="px-6 py-3 bg-white rounded-full border border-gray-300 hover:bg-gray-100 transition"
           >
             대본 파일 선택
@@ -270,11 +295,11 @@ export default function Analysis_Content() {
         {/* 파일명 표시 */}
         {fileInfo.script && (
           <p className="text-sm text-gray-600 mt-4">
-            📝 {fileInfo.script.name}
+            📝 {fileInfo.script.name || '텍스트 입력'}
           </p>
         )}
 
-        {/* 실행/초기화 버튼 + 진행도/에러 */}
+        {/* 실행/초기화 + 진행/에러 */}
         <div className="mt-6 flex items-center justify-center gap-3">
           <button
             onClick={handleRun}
@@ -295,7 +320,6 @@ export default function Analysis_Content() {
           </button>
         </div>
 
-        {/* [PROGRESS] 서버 진행률 바 */}
         {(loading || progress > 0) && (
           <div className="mt-4">
             <div className="w-full bg-gray-100 rounded-full h-2">
@@ -380,7 +404,6 @@ export default function Analysis_Content() {
                 </div>
               </div>
 
-              {/* ⬇️ 폰트 통일 포인트: pre → div, font-sans 추가 */}
               <div className="p-5">
                 {tab === 'original' ? (
                   <div className="whitespace-pre-wrap break-words text-sm leading-6 font-sans">
@@ -410,11 +433,13 @@ export default function Analysis_Content() {
             </section>
           )}
 
-          {/* 레이더(임시 시각화) */}
+          {/* ✅ 레이더(실데이터 우선, 없으면 임시) */}
           <section className="rounded-lg border bg-white">
             <div className="flex items-center justify-between p-4">
               <div className="flex items-center gap-2">
-                <h4 className="font-semibold">발표 패턴 분석(임시 지표)</h4>
+                <h4 className="font-semibold">
+                  {hasScores ? '항목별 종합 점수 (0~10)' : '발표 패턴 분석(임시 지표)'}
+                </h4>
               </div>
             </div>
             <div className="px-4 pb-6">
@@ -437,7 +462,7 @@ export default function Analysis_Content() {
             </div>
           </section>
 
-          {/* 내용 피드백 텍스트 */}
+          {/* ✅ AI 내용 피드백 */}
           {feedbackText && (
             <section className="rounded-lg border bg-white">
               <div className="flex items-center justify-between p-4">
