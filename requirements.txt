@@ -1,0 +1,34 @@
+# ==== Core ====
+numpy<2
+scipy
+scikit-learn
+joblib
+
+# ==== ML/DL ====
+tensorflow
+keras
+tensorboard
+torch
+torchaudio
+faster-whisper
+openai
+
+# ==== Vision/Audio ====
+opencv-python
+mediapipe
+librosa
+imutils
+SpeechRecognition
+pydub
+ffmpeg-python
+
+# ==== Backend/Utils ====
+fastapi
+uvicorn
+python-multipart
+urllib3
+pandas
+python-dotenv
+
+# ==== From source ====
+git+https://github.com/openai/whisper.git
