@@ -106,11 +106,11 @@ export default function App() {
                       </span>과 함께하세요
                     </span>
                   </motion.h1>
-                  <p className="text-base md:text-lg text-gray-700 leading-none">
-                    <span className="block md:inline">언제 어디서든 AI가 실시간으로</span><br className="md:hidden" />
-                    <span className="block md:inline">발표를 분석하고 피드백을 제공합니다.</span><br className="md:hidden" />
-                    <span className="block md:inline">지금 바로 연습을 시작해보세요.</span>
-                  </p>
+                 <p className="text-base md:text-lg text-gray-700 leading-relaxed">
+                    <span className="block">언제 어디서든 AI가 실시간으로 발표를 분석하고 피드백을 제공합니다.</span>
+                    <span className="block mt-1">지금 바로 연습을 시작해보세요.</span>
+                 </p>
+
                 </div>
                 <div className="relative inline-block z-10 mt-12 md:mt-0 md:-translate-x-[8rem]">
                   <img

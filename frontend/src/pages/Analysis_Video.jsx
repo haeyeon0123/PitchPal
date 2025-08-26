@@ -22,12 +22,9 @@ import {
 } from "recharts";
 
 /* ===================== API 설정 ===================== */
-// 1) .env에 REACT_APP_API_BASE=http://localhost:8000 있으면 그걸 사용, 없으면 로컬 기본
 const API_BASE =
   (process.env.REACT_APP_API_BASE || "http://localhost:8000").replace(/\/+$/, "");
 
-// 2) 실제 백엔드 엔드포인트 경로
-//    * 백엔드가 /video/analyze, /analyze-video 등으로 다르면 여기만 수정!
 const VIDEO_ENDPOINT = "/analyze-video";
 
 /* ===================== Colors ===================== */
@@ -35,15 +32,27 @@ const COLOR_PRIMARY = "#5686C4";
 const COLOR_SECONDARY = "#826BC6";
 const COLOR_ALT1 = "#6EAED5"; // 섹션 바
 const COLOR_ACCENT = "#3EB489"; // 라인차트 허용대역
-const COLOR_START = "#7FB77E"; // 시작 버튼 (흰 글자)
+const COLOR_START = "#7FB77E"; // 시작 버튼
 
 const STRIP_UP = "#F9D2D2";     // 상
 const STRIP_FRONT = "#D9F1E4";  // 정면
 const STRIP_DOWN = "#D6E2FB";   // 하
 
+// 3버킷 색상(타임라인에 사용)
 const EMO_POS = "#FFE6A7";
 const EMO_NEU = "#E8E8EA";
 const EMO_NEG = "#FAD4D8";
+
+/* ===== 7감정 메타 ===== */
+const EMOTION_ORDER = ["angry","disgust","scared","happy","sad","surprised","neutral"];
+const EMO_LABEL = {
+  angry:"분노(Angry)", disgust:"혐오(Disgust)", scared:"두려움(Scared)",
+  happy:"행복(Happy)", sad:"슬픔(Sad)", surprised:"놀람(Surprised)", neutral:"중립(Neutral)"
+};
+const EMO_COLOR7 = {
+  angry:"#F8C7C7", disgust:"#CFE8D9", scared:"#DAD1F3",
+  happy:"#FBE5B5", sad:"#D6E8FA", surprised:"#FADBC6", neutral:"#E6EEF5"
+};
 
 /* ===================== Helpers ===================== */
 const secToMMSS = (s) => {
@@ -73,7 +82,19 @@ function genDummySeries(len = 118) {
     if (t > emoBlocks[idx].until && idx < emoBlocks.length - 1) idx++;
     emotion.push(emoBlocks[idx].label);
   }
-  return { ear, pitch, emotion };
+
+  // 7감정 더미 분포(합=1)
+  const emotion_dist7 = {
+    angry:0.03, disgust:0.02, scared:0.12, happy:0.32, sad:0.06, surprised:0.05, neutral:0.40
+  };
+
+  return {
+    ear, pitch, emotion,
+    emotion_dist7,
+    emotion_warning: "질의응답에서 중립 비중이 늘어납니다. 결론 요약 후 미소를 한 번 체크해 보세요.",
+    most_common_emotion: "neutral",
+    negative_ratio: emotion_dist7.angry + emotion_dist7.disgust + emotion_dist7.scared + emotion_dist7.sad + emotion_dist7.surprised,
+  };
 }
 
 function detectBlinks(earSeries, thr = 0.19, refractory = 5) {
@@ -95,7 +116,6 @@ function ratio(counts) {
 
 const pitchToPose = (p) => (p > 8 ? "상" : p < -8 ? "하" : "정면");
 
-// Pie 내부 라벨
 const RADIAN = Math.PI / 180;
 const posePieLabel = ({ cx, cy, midAngle, innerRadius, outerRadius, percent, name }) => {
   const radius = innerRadius + (outerRadius - innerRadius) * 0.5;
@@ -110,25 +130,20 @@ const posePieLabel = ({ cx, cy, midAngle, innerRadius, outerRadius, percent, nam
 
 /* ===================== Main ===================== */
 export default function Analysis_Video() {
-  // phase: idle → analyzing → done
   const [phase, setPhase] = useState("idle");
 
-  // 업로드한 실제 파일 객체 + 미리보기 URL
   const videoRef = useRef(null);
-  const [fileObj, setFileObj] = useState(null); // ← 백엔드 전송에 사용
-  const [fileUrl, setFileUrl] = useState("");   // ← 비디오 미리보기
+  const [fileObj, setFileObj] = useState(null);
+  const [fileUrl, setFileUrl] = useState("");
   const [fileName, setFileName] = useState("");
   const [progress, setProgress] = useState(0);
 
-  // 백엔드 실패 혹은 경고 메시지
   const [notice, setNotice] = useState("");
 
-  // 분석 결과 시계열 (백엔드에서 수신 or 더미)
   const DEMO_LEN = 118;
-  const [series, setSeries] = useState(() => genDummySeries(DEMO_LEN)); // 초기 화면용 더미
+  const [series, setSeries] = useState(() => genDummySeries(DEMO_LEN));
   const DURATION_SEC = series?.ear?.length || DEMO_LEN;
 
-  // 분석 전 스크롤바 숨김 (헤더는 유지)
   useEffect(() => {
     const prev = document.body.style.overflowY;
     if (phase === "idle" || phase === "analyzing") document.body.style.overflowY = "hidden";
@@ -143,8 +158,7 @@ export default function Analysis_Video() {
     () => Math.round(((blinkEvents.length || 0) / Math.max(1, DURATION_SEC / 60)) * 10) / 10,
     [blinkEvents.length, DURATION_SEC]
   );
-  const avgEar = useMemo(
-    () => {
+  const avgEar = useMemo(() => {
       const arr = series.ear || [];
       if (!arr.length) return 0;
       return Math.round((arr.reduce((a, b) => a + b, 0) / arr.length) * 1000) / 1000;
@@ -160,13 +174,24 @@ export default function Analysis_Video() {
   }, [poseLabels]);
   const poseRatio = useMemo(() => ratio(poseCounts), [poseCounts]);
 
-  const emoCounts = useMemo(() => {
-    const c = { positive: 0, neutral: 0, negative: 0 };
-    (series.emotion || []).forEach((e) => c[e] !== undefined && (c[e]++));
-    return c;
-  }, [series.emotion]);
-  const emoRatio = useMemo(() => ratio(emoCounts), [emoCounts]);
-  const dominantEmo = useMemo(() => Object.entries(emoRatio).sort((a, b) => b[1] - a[1])[0][0], [emoRatio]);
+  /* ===== 7감정 분포(백엔드 distribution/counts → ratio로 변환) ===== */
+  const emotionDist7 = useMemo(() => {
+    if (series.emotion_dist7) return series.emotion_dist7; // 이미 ratio로 저장된 경우
+    return null;
+  }, [series.emotion_dist7]);
+
+  // 3버킷 요약(7감정 → P/N/N)
+  const emoRatio = useMemo(() => {
+    const d = emotionDist7 || {};
+    const positive = d.happy ?? 0;
+    const neutral = d.neutral ?? 0;
+    const negative =
+      (d.angry ?? 0) + (d.disgust ?? 0) + (d.scared ?? 0) + (d.sad ?? 0) + (d.surprised ?? 0);
+    return { positive, neutral, negative };
+  }, [emotionDist7]);
+
+  const dominantEmo =
+    Object.entries(emoRatio).sort((a, b) => b[1] - a[1])[0]?.[0] || "neutral";
 
   const blinkStatus = blinksPerMin >= 10 && blinksPerMin <= 20 ? "적절" : blinksPerMin < 10 ? "낮음" : "높음";
   const poseStatus = (poseRatio["정면"] || 0) >= 0.6 ? "좋음" : (poseRatio["정면"] || 0) >= 0.45 ? "보통" : "주의";
@@ -177,15 +202,14 @@ export default function Analysis_Video() {
     { name: "상", value: Math.round((poseRatio["상"] || 0) * 100) },
     { name: "하", value: Math.round((poseRatio["하"] || 0) * 100) },
   ];
-  const emoPie = [
-    { name: "Positive", value: Math.round((emoRatio.positive || 0) * 100) },
-    { name: "Neutral", value: Math.round((emoRatio.neutral || 0) * 100) },
-    { name: "Negative", value: Math.round((emoRatio.negative || 0) * 100) },
-  ];
+
+  // 7감정 파이
+  const emoPie7 = EMOTION_ORDER.map((k) => ({
+    key: k, name: EMO_LABEL[k], value: Math.round(((emotionDist7?.[k] ?? 0) * 100))
+  }));
 
   // 타임라인 스트립 툴팁
   const poseTooltipOf = (p) => (p === "상" ? "고개를 위로 든 상태" : p === "하" ? "고개를 아래로 숙인 상태" : "시선이 정면");
-  const emoTooltipOf = (e) => (e === "positive" ? "밝은 표정" : e === "negative" ? "긴장된 표정" : "중립 표정");
 
   /* ========== 업로드/분석 핸들러 ========== */
   const resetUpload = useCallback(() => {
@@ -195,13 +219,12 @@ export default function Analysis_Video() {
     setProgress(0);
     setNotice("");
     setPhase("idle");
-    // 초기 화면 보기 위해 더미 리셋
     setSeries(genDummySeries(DEMO_LEN));
   }, []);
 
   const handleFilePick = useCallback((file) => {
     if (!file) return;
-    setFileObj(file);          // ← 백엔드 전송에 사용
+    setFileObj(file);
     setFileName(file.name);
     const url = URL.createObjectURL(file);
     setFileUrl(url);
@@ -217,50 +240,73 @@ export default function Analysis_Video() {
       setNotice("");
 
       const fd = new FormData();
-      fd.append("video", fileObj);   // ⚠️ 서버에서 기대하는 필드명이 'video' 라고 가정
-      // 필요 시 다른 정보(예: 대본/옵션)도 함께 추가 가능: fd.append("script", scriptText);
+      fd.append("video", fileObj);
 
       const { data } = await axios.post(`${API_BASE}${VIDEO_ENDPOINT}`, fd, {
         headers: { "Content-Type": "multipart/form-data" },
-        // 업로드 진행률 표시 (총 용량을 알 수 있을 때만 동작)
         onUploadProgress: (e) => {
           if (e.total) {
             const pct = Math.round((e.loaded / e.total) * 100);
             setProgress(Math.min(99, Math.max(1, pct)));
           }
         },
-        // 타임아웃을 길게 (영상 업로드/분석은 오래 걸릴 수 있음)
         timeout: 300000,
       });
 
-      // ====== 응답 파싱 (서버 스키마 차이를 최대한 흡수) ======
-      let ear = data?.ear || data?.ear_series || data?.timeline?.ear || [];
-      let pitch = data?.pitch || data?.pitch_series || data?.timeline?.pitch || [];
-      let emotion = data?.emotion || data?.emotion_series || data?.timeline?.emotion || [];
+      // ====== 응답 파싱 ======
+      // 시계열(있을 수도/없을 수도)
+      const ear = data?.ear || data?.ear_series || data?.timeline?.ear || [];
+      const pitch = data?.pitch || data?.pitch_series || data?.timeline?.pitch || [];
+      let emotionTimeline = data?.emotion || data?.emotion_series || data?.timeline?.emotion || [];
 
-      // emotion 값 표준화 (ex: "pos"/1/-1 → "positive"/"neutral"/"negative")
-      emotion = (emotion || []).map((x) => {
+      // 7감정 분포
+      const dist = data?.distribution || null;   // {angry:0.03,...}
+      const counts = data?.counts || null;       // {angry:16,...}
+      let emotion_dist7 = null;
+
+      if (dist && Object.keys(dist).length) {
+        // 이미 ratio인 경우 그대로 사용
+        emotion_dist7 = { ...dist };
+      } else if (counts && Object.keys(counts).length) {
+        const total = Object.values(counts).reduce((a,b)=>a+b,0) || 1;
+        emotion_dist7 = {};
+        EMOTION_ORDER.forEach(k => emotion_dist7[k] = (counts[k]||0)/total);
+      }
+
+      // 경고/요약
+      const emotion_warning = data?.warning || "";
+      const most_common_emotion = data?.most_common_emotion || null;
+      const negative_ratio = (typeof data?.negative_emotion_ratio === "number")
+        ? data.negative_emotion_ratio
+        : (emotion_dist7
+           ? (emotion_dist7.angry||0)+(emotion_dist7.disgust||0)+(emotion_dist7.scared||0)+(emotion_dist7.sad||0)+(emotion_dist7.surprised||0)
+           : 0);
+
+      // 이전 3버킷 타임라인과 호환되는 문자열 표준화
+      emotionTimeline = (emotionTimeline || []).map((x) => {
         const v = (typeof x === "string" ? x.toLowerCase() : x);
         if (v === "pos" || v === "positive" || v === 1) return "positive";
         if (v === "neg" || v === "negative" || v === -1) return "negative";
         return "neutral";
       });
 
-      // 응답에 아무것도 없으면 에러 처리
-      if (!ear.length && !pitch.length && !emotion.length) {
-        throw new Error("서버 응답에 분석 시계열이 없습니다.");
+      if (!ear.length && !pitch.length && !emotion_dist7) {
+        throw new Error("서버 응답에 분석 결과가 없습니다.(ear/pitch/distribution)");
       }
 
       setSeries({
         ear,
         pitch,
-        emotion,
+        emotion: emotionTimeline,    // 3버킷 타임라인(있으면 스트립에 사용)
+        emotion_dist7,               // 7감정 분포(파이/스트립에 사용)
+        emotion_warning,
+        most_common_emotion,
+        negative_ratio,
       });
 
       setProgress(100);
       setPhase("done");
     } catch (err) {
-      // ====== 실패 시: 더미데이터로 렌더 + 안내 ======
       console.error(err);
       setNotice(
         "백엔드 분석 API 호출에 실패하여 예시 데이터로 표시합니다. " +
@@ -272,7 +318,6 @@ export default function Analysis_Video() {
     }
   }, [fileObj]);
 
-  // 분석 완료 후 특정 시점으로 이동
   const onRestart = useCallback(() => {
     if (videoRef.current) { videoRef.current.currentTime = 0; videoRef.current.pause(); }
     window.scrollTo({ top: 0, behavior: "smooth" });
@@ -294,7 +339,6 @@ export default function Analysis_Video() {
     <div className="bg-gradient-to-b from-white to-[#f7f9fc]">
       <div className={`mx-auto max-w-7xl px-5 ${phase !== "done" ? "pt-8 pb-0" : "py-8"}`}>
 
-        {/* 업로드 전/분석중 */}
         {(phase === "idle" || phase === "analyzing") && (
           <div className="mx-auto max-w-xl">
             <UploadBoxUnified
@@ -308,10 +352,8 @@ export default function Analysis_Video() {
           </div>
         )}
 
-        {/* 분석 완료 */}
         {phase === "done" && (
           <>
-            {/* 공지/경고 (백엔드 실패 등) */}
             {notice && (
               <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
                 {notice}
@@ -321,7 +363,6 @@ export default function Analysis_Video() {
               </div>
             )}
 
-            {/* 상단: 업로드(좌) + 사용자 영상(우) */}
             <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
               <div>
                 <UploadBoxUnified compact fileName={fileName} isAnalyzing={false} progress={100} onPick={handleFilePick} onStart={analyze} onReset={resetUpload} />
@@ -337,7 +378,6 @@ export default function Analysis_Video() {
               </div>
             </div>
 
-            {/* 섹션 타이틀: 발표 패턴 분석 */}
             <div className="mt-8 mb-3 flex items-center gap-3">
               <span className="h-5 w-1.5 rounded-full" style={{ backgroundColor: COLOR_ALT1 }} />
               <h2 className="text-xl font-semibold text-gray-900">발표 패턴 분석</h2>
@@ -376,30 +416,38 @@ export default function Analysis_Video() {
                         );
                       }}
                     />
-                    {/* EAR 허용대역(예시): 0.18~0.32 */}
                     <ReferenceArea y1={0.18} y2={0.32} fill={COLOR_ACCENT} fillOpacity={0.08} />
                     <Line type="monotone" dataKey="ear" stroke={COLOR_SECONDARY} dot={false} strokeWidth={2} />
                   </LineChart>
                 </ResponsiveContainer>
               </div>
 
-              <StripRow
-                className="mt-3"
-                label="감정"
-                data={series.emotion || []}
-                colorOf={(e) => (e === "positive" ? EMO_POS : e === "negative" ? EMO_NEG : EMO_NEU)}
-                onClickIndex={seekTo}
-                tooltipOf={emoTooltipOf}
-              />
+              {/* 감정 스트립: 7감정 분포 기반(시간축 없이 비율로 구획) */}
+              <div className="mt-3">
+                <EmotionStrip
+                  label="감정(7분포)"
+                  dist7={series.emotion_dist7}
+                />
+              </div>
+
+              {/* 기존 3버킷 타임라인이 있다면 그대로 보여주고 싶을 때 아래 유지 */}
+              {Array.isArray(series.emotion) && series.emotion.length > 0 && (
+                <StripRow
+                  className="mt-3"
+                  label="감정(3버킷 타임라인)"
+                  data={series.emotion}
+                  colorOf={(e) => (e === "positive" ? EMO_POS : e === "negative" ? EMO_NEG : EMO_NEU)}
+                  onClickIndex={seekTo}
+                  tooltipOf={(e) => (e === "positive" ? "밝은 표정" : e === "negative" ? "긴장된 표정" : "중립 표정")}
+                />
+              )}
             </motion.div>
 
-            {/* 섹션 타이틀: 종합 피드백 */}
             <div className="mt-8 mb-3 flex items-center gap-3">
               <span className="h-5 w-1.5 rounded-full" style={{ backgroundColor: COLOR_ALT1 }} />
               <h2 className="text-xl font-semibold text-gray-900">종합 피드백</h2>
             </div>
 
-            {/* 3카드 — 동일 높이/정렬 */}
             <div className="mt-6 grid grid-cols-1 gap-6 xl:grid-cols-3">
               {/* 고개 방향 */}
               <InsightCard title="고개 방향" subtitle="정면 유지가 좋을수록 메시지 전달이 선명해요" status={poseStatus}>
@@ -417,10 +465,9 @@ export default function Analysis_Video() {
                       </ResponsiveContainer>
                     </div>
                   </div>
-                  {/* 예시 경고문 — 실제 로직으로 교체 가능 */}
                   <div className="mt-auto">
                     <div className="rounded-lg border border-amber-200 bg-amber-50 p-2 text-amber-800 text-sm">
-                      고개가 아래로 숙인 구간이 감지됐어요 (약 6%). 질문을 들을 때도 시선을 정면에 두면 전달력이 좋아져요.
+                      고개가 아래로 숙인 구간이 감지됐어요 (약 {tiltDownPct}%). 질문을 들을 때도 시선을 정면에 두면 전달력이 좋아져요.
                     </div>
                   </div>
                 </div>
@@ -442,35 +489,34 @@ export default function Analysis_Video() {
                 </div>
               </InsightCard>
 
-              {/* 표정/감정 */}
+              {/* 표정/감정 (7감정) */}
               <InsightCard title="표정/감정" subtitle="밝은 표정은 친화감을 높여요" status={emoStatus}>
                 <div className="flex flex-col min-h-[340px]">
                   <div className="flex-1 h-[220px] grid grid-cols-1 gap-4 sm:grid-cols-2 items-center">
                     <div className="h-full">
                       <ResponsiveContainer width="100%" height="100%">
                         <PieChart>
-                          <Pie data={emoPie} dataKey="value" nameKey="name" outerRadius={85}>
-                            <Cell fill={EMO_POS} />
-                            <Cell fill={EMO_NEU} />
-                            <Cell fill={EMO_NEG} />
+                          <Pie data={emoPie7} dataKey="value" nameKey="name" outerRadius={85}>
+                            {EMOTION_ORDER.map((k) => (
+                              <Cell key={k} fill={EMO_COLOR7[k]} />
+                            ))}
                           </Pie>
                         </PieChart>
                       </ResponsiveContainer>
                     </div>
-                    <div className="text-sm space-y-2">
-                      <RowKV k="밝은(Positive)" v={`${Math.round((emoRatio.positive || 0) * 100)}%`} />
-                      <RowKV k="중립(Neutral)" v={`${Math.round((emoRatio.neutral || 0) * 100)}%`} />
-                      <RowKV k="긴장(Negative)" v={`${Math.round((emoRatio.negative || 0) * 100)}%`} />
+                    <div className="text-sm space-y-1">
+                      {EMOTION_ORDER.map((k) => (
+                        <RowKV key={k} k={EMO_LABEL[k]} v={`${Math.round(((emotionDist7?.[k] ?? 0) * 100))}%`} />
+                      ))}
                     </div>
                   </div>
                   <div className="mt-auto pt-4 rounded-lg bg-gray-50 p-2 text-sm text-gray-600">
-                    질의응답 구간에서 중립 비중이 늘어납니다. 결론 요약 후 미소를 한 번 체크해 보세요.
+                    {series.emotion_warning || "표정 신호를 전체적으로 안정적으로 사용하고 있어요."}
                   </div>
                 </div>
               </InsightCard>
             </div>
 
-            {/* 하단 단독 버튼 */}
             <div className="mt-10 mb-8 flex flex-wrap items-center justify-center gap-3">
               <button
                 onClick={() => videoRef.current?.play()}
@@ -536,6 +582,38 @@ function StripRow({ label, data, colorOf, onClickIndex, tooltipOf, className = "
             className="h-full flex-1"
             style={{ backgroundColor: colorOf(d) }}
             title={tooltipOf ? `${secToMMSS(i)} · ${String(d)} — ${tooltipOf(d)}` : secToMMSS(i)}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* ===== 7감정 분포 스트립(시간정보 없이 비율로 구획) ===== */
+function EmotionStrip({ label = "감정", dist7 }) {
+  const segments = useMemo(() => {
+    if (!dist7) return [];
+    return EMOTION_ORDER
+      .map((k) => ({ key: k, widthPct: (dist7[k] || 0) * 100, color: EMO_COLOR7[k], label: EMO_LABEL[k] }))
+      .filter((s) => s.widthPct > 0);
+  }, [dist7]);
+
+  const totalPct = Math.round(segments.reduce((a,b)=>a+b.widthPct,0));
+  return (
+    <div className="rounded-xl border p-3">
+      <div className="mb-2 flex items-center justify-between">
+        <div className="flex items-center gap-2 text-sm font-medium text-gray-800">
+          <ListChecks className="h-4 w-4 text-gray-500" />
+          {label}
+        </div>
+        <div className="text-xs text-gray-500">{totalPct}%</div>
+      </div>
+      <div className="flex h-6 w-full overflow-hidden rounded-md">
+        {segments.map((seg) => (
+          <div
+            key={seg.key}
+            style={{ width: `${seg.widthPct}%`, backgroundColor: seg.color }}
+            title={`${seg.label} ${seg.widthPct.toFixed(1)}%`}
           />
         ))}
       </div>
