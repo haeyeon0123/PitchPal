@@ -400,39 +400,48 @@ export default function Analysis_Video() {
 />
 
 {/* 👇👇 여기부터 추가/교체: 아이콘 포함 캡션 + 간격 확보 */}
-<div className="mt-6 mb-1 flex items-center gap-2 text-sm font-medium text-gray-700">
-  <Eye className="h-4 w-4 text-indigo-500" />  {/* 👁️ Eye 아이콘 */}
-  <span>눈 깜빡임</span>
+{/* 👁️ 눈 깜빡임 섹션 */}
+<div className="mt-6 rounded-xl border p-3">
+  <div className="mb-2 flex items-center gap-2 text-sm font-medium text-gray-800">
+    <Eye className="h-4 w-4 text-gray-500" />
+    <span>눈 깜빡임</span>
+  </div>
+  <div className="h-44 w-full">
+    <ResponsiveContainer width="100%" height="100%">
+      <LineChart
+        data={earData}
+        onClick={(e) => e && typeof e.activeLabel === "number" && seekTo(e.activeLabel)}
+        margin={{ top: 10, right: 12, bottom: 8, left: 0 }}
+      >
+        <CartesianGrid strokeDasharray="3 3" />
+        <XAxis dataKey="t" tickFormatter={secToMMSS} interval={Math.floor(DURATION_SEC / 6)} />
+        <YAxis domain={[0.05, 0.4]} />
+        <RechartsTooltip
+          content={({ active, payload, label }) => {
+            if (!active || !payload?.length) return null;
+            const val = payload[0]?.value;
+            return (
+              <div className="rounded-md bg-white/95 backdrop-blur border px-3 py-2 text-sm shadow">
+                <div className="font-medium">{secToMMSS(label)} · 눈 깜빡임</div>
+                <div className="text-gray-500">EAR {val}</div>
+                <div className="text-xs text-gray-400">값이 낮을수록 눈이 감김</div>
+              </div>
+            );
+          }}
+        />
+        <ReferenceArea y1={0.18} y2={0.32} fill={COLOR_ACCENT} fillOpacity={0.08} />
+        <Line
+          type="monotone"
+          dataKey="ear"
+          stroke={COLOR_SECONDARY}
+          dot={false}
+          strokeWidth={2}
+        />
+      </LineChart>
+    </ResponsiveContainer>
+  </div>
 </div>
 
-<div className="h-44 w-full">
-  <ResponsiveContainer width="100%" height="100%">
-    <LineChart
-      data={earData}
-      onClick={(e) => e && typeof e.activeLabel === "number" && seekTo(e.activeLabel)}
-      margin={{ top: 10, right: 12, bottom: 8, left: 0 }}
-    >
-      <CartesianGrid strokeDasharray="3 3" />
-      <XAxis dataKey="t" tickFormatter={secToMMSS} interval={Math.floor(DURATION_SEC / 6)} />
-      <YAxis domain={[0.05, 0.4]} />
-      <RechartsTooltip
-        content={({ active, payload, label }) => {
-          if (!active || !payload?.length) return null;
-          const val = payload[0]?.value;
-          return (
-            <div className="rounded-md bg-white/95 backdrop-blur border px-3 py-2 text-sm shadow">
-              <div className="font-medium">{secToMMSS(label)} · 눈 깜빡임</div>
-              <div className="text-gray-500">EAR {val}</div>
-              <div className="text-xs text-gray-400">값이 낮을수록 눈이 감김</div>
-            </div>
-          );
-        }}
-      />
-      <ReferenceArea y1={0.18} y2={0.32} fill={COLOR_ACCENT} fillOpacity={0.08} />
-      <Line type="monotone" dataKey="ear" stroke={COLOR_SECONDARY} dot={false} strokeWidth={2} />
-    </LineChart>
-  </ResponsiveContainer>
-</div>
 
 
 
