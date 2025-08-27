@@ -1,12 +1,12 @@
 // 영상 분석 페이지 (백엔드 연동 Ver.)
 // - 업로드한 동영상을 백엔드(FastAPI)로 전송하여 분석 결과(깜빡임/자세/감정)를 수신
 // - 백엔드가 준비되지 않았거나 실패 시, 더미데이터로 안전하게 렌더
-// - 엔드포인트만 맞추면 바로 붙도록 주석 자세히 기재
+// - 팀원 blink summary(JSON) 포맷을 지원, 감정(3버킷 타임라인) 섹션 제거
 
 import React, { useMemo, useRef, useState, useCallback, useEffect } from "react";
 import axios from "axios";
 import { motion } from "framer-motion";
-import { Video as VideoIcon, ListChecks } from "lucide-react";
+import { Video as VideoIcon, ListChecks, Eye } from "lucide-react";
 import {
   ResponsiveContainer,
   LineChart,
@@ -24,7 +24,6 @@ import {
 /* ===================== API 설정 ===================== */
 const API_BASE =
   (process.env.REACT_APP_API_BASE || "http://localhost:8000").replace(/\/+$/, "");
-
 const VIDEO_ENDPOINT = "/analyze-video";
 
 /* ===================== Colors ===================== */
@@ -37,11 +36,6 @@ const COLOR_START = "#7FB77E"; // 시작 버튼
 const STRIP_UP = "#F9D2D2";     // 상
 const STRIP_FRONT = "#D9F1E4";  // 정면
 const STRIP_DOWN = "#D6E2FB";   // 하
-
-// 3버킷 색상(타임라인에 사용)
-const EMO_POS = "#FFE6A7";
-const EMO_NEU = "#E8E8EA";
-const EMO_NEG = "#FAD4D8";
 
 /* ===== 7감정 메타 ===== */
 const EMOTION_ORDER = ["angry","disgust","scared","happy","sad","surprised","neutral"];
@@ -69,19 +63,6 @@ function genDummySeries(len = 118) {
     return Math.max(0.08, +(base + blink).toFixed(3));
   });
   const pitch = Array.from({ length: len }, (_, i) => 8 * Math.sin(i / 20) + (i < 25 ? 5 : i > 85 ? -6 : 0));
-  const emoBlocks = [
-    { label: "positive", until: 35 },
-    { label: "neutral", until: 70 },
-    { label: "positive", until: 95 },
-    { label: "neutral", until: 110 },
-    { label: "positive", until: len - 1 },
-  ];
-  let idx = 0;
-  const emotion = [];
-  for (let t = 0; t < len; t++) {
-    if (t > emoBlocks[idx].until && idx < emoBlocks.length - 1) idx++;
-    emotion.push(emoBlocks[idx].label);
-  }
 
   // 7감정 더미 분포(합=1)
   const emotion_dist7 = {
@@ -89,7 +70,7 @@ function genDummySeries(len = 118) {
   };
 
   return {
-    ear, pitch, emotion,
+    ear, pitch,
     emotion_dist7,
     emotion_warning: "질의응답에서 중립 비중이 늘어납니다. 결론 요약 후 미소를 한 번 체크해 보세요.",
     most_common_emotion: "neutral",
@@ -128,6 +109,39 @@ const posePieLabel = ({ cx, cy, midAngle, innerRadius, outerRadius, percent, nam
   );
 };
 
+/* ====== Blink Summary 정규화 & 스타일 ====== */
+function normalizeBlinkSummary(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const K = {
+    duration: raw["분석 영상 길이"] ?? raw.duration ?? raw.video_duration,
+    count: raw["눈 깜빡임 횟수"] ?? raw.blink_count ?? raw.count,
+    freq: raw["눈 깜빡임 빈도 (회/분)"] ?? raw.blinks_per_min ?? raw.frequency,
+    grade: raw["눈 깜빡임 평가 등급"] ?? raw.blink_grade ?? raw.grade,
+    interp: raw["눈 깜빡임 해석"] ?? raw.blink_interpretation ?? raw.interpretation,
+  };
+  const freqNum = typeof K.freq === "number" ? K.freq : parseFloat(K.freq);
+  const countNum = typeof K.count === "number" ? K.count : parseInt(K.count, 10);
+  return {
+    duration: K.duration ?? "-", // (UI에선 사용 안 함)
+    blinkCount: isNaN(countNum) ? "-" : countNum,
+    blinksPerMin: isNaN(freqNum) ? "-" : Math.round(freqNum * 100) / 100,
+    grade: K.grade ?? "정보 부족",
+    interpretation: K.interp ?? "",
+  };
+}
+function gradeStyle(grade) {
+  switch (grade) {
+    case "정상":
+      return { text: "text-emerald-700", bg: "bg-emerald-50", ring: "ring-emerald-200" };
+    case "주의":
+      return { text: "text-amber-700", bg: "bg-amber-50", ring: "ring-amber-200" };
+    case "경고":
+      return { text: "text-rose-700", bg: "bg-rose-50", ring: "ring-rose-200" };
+    default:
+      return { text: "text-gray-700", bg: "bg-gray-50", ring: "ring-gray-200" };
+  }
+}
+
 /* ===================== Main ===================== */
 export default function Analysis_Video() {
   const [phase, setPhase] = useState("idle");
@@ -144,6 +158,9 @@ export default function Analysis_Video() {
   const [series, setSeries] = useState(() => genDummySeries(DEMO_LEN));
   const DURATION_SEC = series?.ear?.length || DEMO_LEN;
 
+  // 👇 깜빡임 요약(팀원 JSON) 상태
+  const [blinkSummary, setBlinkSummary] = useState(null);
+
   useEffect(() => {
     const prev = document.body.style.overflowY;
     if (phase === "idle" || phase === "analyzing") document.body.style.overflowY = "hidden";
@@ -154,16 +171,9 @@ export default function Analysis_Video() {
   /* ========== 도메인 데이터 파생 (차트/카드 계산) ========== */
   const earData = useMemo(() => (series.ear || []).map((v, i) => ({ t: i, ear: v })), [series.ear]);
   const blinkEvents = useMemo(() => detectBlinks(series.ear || []), [series.ear]);
-  const blinksPerMin = useMemo(
+  const blinksPerMinLocal = useMemo(
     () => Math.round(((blinkEvents.length || 0) / Math.max(1, DURATION_SEC / 60)) * 10) / 10,
     [blinkEvents.length, DURATION_SEC]
-  );
-  const avgEar = useMemo(() => {
-      const arr = series.ear || [];
-      if (!arr.length) return 0;
-      return Math.round((arr.reduce((a, b) => a + b, 0) / arr.length) * 1000) / 1000;
-    },
-    [series.ear]
   );
 
   const poseLabels = useMemo(() => (series.pitch || []).map(pitchToPose), [series.pitch]);
@@ -176,26 +186,9 @@ export default function Analysis_Video() {
 
   /* ===== 7감정 분포(백엔드 distribution/counts → ratio로 변환) ===== */
   const emotionDist7 = useMemo(() => {
-    if (series.emotion_dist7) return series.emotion_dist7; // 이미 ratio로 저장된 경우
+    if (series.emotion_dist7) return series.emotion_dist7; // 이미 ratio
     return null;
   }, [series.emotion_dist7]);
-
-  // 3버킷 요약(7감정 → P/N/N)
-  const emoRatio = useMemo(() => {
-    const d = emotionDist7 || {};
-    const positive = d.happy ?? 0;
-    const neutral = d.neutral ?? 0;
-    const negative =
-      (d.angry ?? 0) + (d.disgust ?? 0) + (d.scared ?? 0) + (d.sad ?? 0) + (d.surprised ?? 0);
-    return { positive, neutral, negative };
-  }, [emotionDist7]);
-
-  const dominantEmo =
-    Object.entries(emoRatio).sort((a, b) => b[1] - a[1])[0]?.[0] || "neutral";
-
-  const blinkStatus = blinksPerMin >= 10 && blinksPerMin <= 20 ? "적절" : blinksPerMin < 10 ? "낮음" : "높음";
-  const poseStatus = (poseRatio["정면"] || 0) >= 0.6 ? "좋음" : (poseRatio["정면"] || 0) >= 0.45 ? "보통" : "주의";
-  const emoStatus = dominantEmo === "positive" ? "친화적" : dominantEmo === "neutral" ? "중립" : "부정";
 
   const posePie = [
     { name: "정면", value: Math.round((poseRatio["정면"] || 0) * 100) },
@@ -203,13 +196,9 @@ export default function Analysis_Video() {
     { name: "하", value: Math.round((poseRatio["하"] || 0) * 100) },
   ];
 
-  // 7감정 파이
-  const emoPie7 = EMOTION_ORDER.map((k) => ({
-    key: k, name: EMO_LABEL[k], value: Math.round(((emotionDist7?.[k] ?? 0) * 100))
-  }));
-
-  // 타임라인 스트립 툴팁
-  const poseTooltipOf = (p) => (p === "상" ? "고개를 위로 든 상태" : p === "하" ? "고개를 아래로 숙인 상태" : "시선이 정면");
+  // 상태 배지 텍스트(깜빡임은 팀원 등급을 우선 표시)
+  const poseStatus = (poseRatio["정면"] || 0) >= 0.6 ? "좋음" : (poseRatio["정면"] || 0) >= 0.45 ? "보통" : "주의";
+  const blinkStatus = blinkSummary?.grade || ((blinksPerMinLocal >= 10 && blinksPerMinLocal <= 20) ? "정상" : blinksPerMinLocal < 10 ? "낮음" : "주의");
 
   /* ========== 업로드/분석 핸들러 ========== */
   const resetUpload = useCallback(() => {
@@ -220,6 +209,7 @@ export default function Analysis_Video() {
     setNotice("");
     setPhase("idle");
     setSeries(genDummySeries(DEMO_LEN));
+    setBlinkSummary(null);
   }, []);
 
   const handleFilePick = useCallback((file) => {
@@ -254,10 +244,8 @@ export default function Analysis_Video() {
       });
 
       // ====== 응답 파싱 ======
-      // 시계열(있을 수도/없을 수도)
       const ear = data?.ear || data?.ear_series || data?.timeline?.ear || [];
       const pitch = data?.pitch || data?.pitch_series || data?.timeline?.pitch || [];
-      let emotionTimeline = data?.emotion || data?.emotion_series || data?.timeline?.emotion || [];
 
       // 7감정 분포
       const dist = data?.distribution || null;   // {angry:0.03,...}
@@ -265,7 +253,6 @@ export default function Analysis_Video() {
       let emotion_dist7 = null;
 
       if (dist && Object.keys(dist).length) {
-        // 이미 ratio인 경우 그대로 사용
         emotion_dist7 = { ...dist };
       } else if (counts && Object.keys(counts).length) {
         const total = Object.values(counts).reduce((a,b)=>a+b,0) || 1;
@@ -282,13 +269,23 @@ export default function Analysis_Video() {
            ? (emotion_dist7.angry||0)+(emotion_dist7.disgust||0)+(emotion_dist7.scared||0)+(emotion_dist7.sad||0)+(emotion_dist7.surprised||0)
            : 0);
 
-      // 이전 3버킷 타임라인과 호환되는 문자열 표준화
-      emotionTimeline = (emotionTimeline || []).map((x) => {
-        const v = (typeof x === "string" ? x.toLowerCase() : x);
-        if (v === "pos" || v === "positive" || v === 1) return "positive";
-        if (v === "neg" || v === "negative" || v === -1) return "negative";
-        return "neutral";
-      });
+      // 👇 팀원 JSON 깜빡임 요약 찾기
+      const rawBlink =
+        data?.blink_summary ??
+        data?.summary?.blink ??
+        data?.blink?.summary ?? null;
+
+      if (rawBlink) {
+        setBlinkSummary(normalizeBlinkSummary(rawBlink));
+      } else {
+        // 서버에 요약이 없으면, 로컬 계산값으로 최소한의 더미 구성
+        setBlinkSummary(normalizeBlinkSummary({
+          "눈 깜빡임 횟수": detectBlinks(ear || []).length,
+          "눈 깜빡임 빈도 (회/분)": blinksPerMinLocal,
+          "눈 깜빡임 평가 등급": (blinksPerMinLocal>=10 && blinksPerMinLocal<=20) ? "정상" : blinksPerMinLocal<10 ? "낮음" : "주의",
+          "눈 깜빡임 해석": blinksPerMinLocal>=10 && blinksPerMinLocal<=20 ? "안정된 상태" : blinksPerMinLocal>=21 ? "약간의 긴장 상태" : "",
+        }));
+      }
 
       if (!ear.length && !pitch.length && !emotion_dist7) {
         throw new Error("서버 응답에 분석 결과가 없습니다.(ear/pitch/distribution)");
@@ -297,8 +294,7 @@ export default function Analysis_Video() {
       setSeries({
         ear,
         pitch,
-        emotion: emotionTimeline,    // 3버킷 타임라인(있으면 스트립에 사용)
-        emotion_dist7,               // 7감정 분포(파이/스트립에 사용)
+        emotion_dist7,
         emotion_warning,
         most_common_emotion,
         negative_ratio,
@@ -309,14 +305,19 @@ export default function Analysis_Video() {
     } catch (err) {
       console.error(err);
       setNotice(
-        "백엔드 분석 API 호출에 실패하여 예시 데이터로 표시합니다. " +
-        "엔드포인트/파라미터를 확인해주세요."
+        "분석 API 호출 실패 → 예시 데이터로 표시합니다. 엔드포인트/파라미터를 확인해주세요."
       );
       setSeries(genDummySeries(DEMO_LEN));
+      setBlinkSummary(normalizeBlinkSummary({
+        "눈 깜빡임 횟수": 12,
+        "눈 깜빡임 빈도 (회/분)": 22.3,
+        "눈 깜빡임 평가 등급": "주의",
+        "눈 깜빡임 해석": "약간의 긴장 상태",
+      }));
       setProgress(100);
       setPhase("done");
     }
-  }, [fileObj]);
+  }, [fileObj, blinksPerMinLocal]);
 
   const onRestart = useCallback(() => {
     if (videoRef.current) { videoRef.current.currentTime = 0; videoRef.current.pause(); }
@@ -332,7 +333,6 @@ export default function Analysis_Video() {
   };
 
   // (예시) 아래 경고는 실제 로직으로 교체 가능
-  const tiltDownWarn = true;
   const tiltDownPct = 6;
 
   return (
@@ -395,7 +395,7 @@ export default function Analysis_Video() {
                 data={poseLabels}
                 colorOf={(p) => (p === "상" ? STRIP_UP : p === "하" ? STRIP_DOWN : STRIP_FRONT)}
                 onClickIndex={seekTo}
-                tooltipOf={poseTooltipOf}
+                tooltipOf={(p) => (p === "상" ? "고개를 위로 든 상태" : p === "하" ? "고개를 아래로 숙인 상태" : "시선이 정면")}
               />
 
               <div className="mt-3 h-44 w-full">
@@ -424,23 +424,10 @@ export default function Analysis_Video() {
 
               {/* 감정 스트립: 7감정 분포 기반(시간축 없이 비율로 구획) */}
               <div className="mt-3">
-                <EmotionStrip
-                  label="감정(7분포)"
-                  dist7={series.emotion_dist7}
-                />
+                <EmotionStrip label="감정(7분포)" dist7={series.emotion_dist7} />
               </div>
 
-              {/* 기존 3버킷 타임라인이 있다면 그대로 보여주고 싶을 때 아래 유지 */}
-              {Array.isArray(series.emotion) && series.emotion.length > 0 && (
-                <StripRow
-                  className="mt-3"
-                  label="감정(3버킷 타임라인)"
-                  data={series.emotion}
-                  colorOf={(e) => (e === "positive" ? EMO_POS : e === "negative" ? EMO_NEG : EMO_NEU)}
-                  onClickIndex={seekTo}
-                  tooltipOf={(e) => (e === "positive" ? "밝은 표정" : e === "negative" ? "긴장된 표정" : "중립 표정")}
-                />
-              )}
+              {/* '감정(3버킷 타임라인)' 섹션 제거됨 */}
             </motion.div>
 
             <div className="mt-8 mb-3 flex items-center gap-3">
@@ -473,30 +460,57 @@ export default function Analysis_Video() {
                 </div>
               </InsightCard>
 
-              {/* 눈 깜빡임 */}
+              {/* ✅ 눈 깜빡임: 파스텔톤 2박스(횟수/빈도), '영상 길이' 제거 */}
               <InsightCard title="눈 깜빡임" subtitle="깜빡임은 긴장 완화의 자연스러운 신호예요" status={blinkStatus}>
                 <div className="flex flex-col min-h-[340px]">
-                  <div className="flex-1 h-[220px] flex items-center justify-center">
-                    <div className="w-56 h-36 rounded-2xl bg-[rgba(62,180,137,0.08)] flex flex-col items-center justify-center text-center shadow-sm">
-                      <div className="text-sm text-gray-500">깜빡임/분</div>
-                      <div className="text-4xl font-semibold text-gray-900">{blinksPerMin}</div>
-                      <div className="text-xs text-gray-500">평균 EAR {avgEar}</div>
+                 
+                  {/* 파스텔 카드 2개 */}
+                  <div className="grid grid-cols-2 gap-4 flex-1 items-center">
+                    <div className="rounded-2xl bg-emerald-50 p-6 flex flex-col items-center justify-center shadow-sm">
+                      <div className="text-sm text-emerald-700">깜빡임 횟수</div>
+                      <div className="text-3xl font-bold text-gray-900 mt-1 [font-variant-numeric:tabular-nums]">
+                        {blinkSummary?.blinkCount ?? "-"}
+                      </div>
+                      <div className="text-xs text-gray-500 mt-1">총</div>
+                    </div>
+
+                    <div className="rounded-2xl bg-indigo-50 p-6 flex flex-col items-center justify-center shadow-sm">
+                      <div className="text-sm text-indigo-700">깜빡임 빈도</div>
+                      <div className="text-3xl font-bold text-gray-900 mt-1 [font-variant-numeric:tabular-nums]">
+                        {blinkSummary?.blinksPerMin ?? "-"}
+                      </div>
+                      <div className="text-xs text-gray-500 mt-1">회/분</div>
                     </div>
                   </div>
-                  <p className="mt-auto pt-4 text-sm text-gray-600 text-center">
-                    초반 20초에 밀집된 깜빡임이 보여요. 시작 직전 복식호흡 2회로 안정도를 높여보세요.
-                  </p>
+
+                  {/* 해석 */}
+                  {blinkSummary?.interpretation && (
+                    <div className="mt-6">
+                      <div className="rounded-lg border border-gray-100 bg-white p-3 text-sm text-gray-600 text-center shadow-sm">
+                        {blinkSummary.interpretation}
+                      </div>
+                    </div>
+                  )}
                 </div>
               </InsightCard>
 
               {/* 표정/감정 (7감정) */}
-              <InsightCard title="표정/감정" subtitle="밝은 표정은 친화감을 높여요" status={emoStatus}>
+              <InsightCard title="표정/감정" subtitle="밝은 표정은 친화감을 높여요" status={series.most_common_emotion ? `${series.most_common_emotion} 우세` : "중립"}>
                 <div className="flex flex-col min-h-[340px]">
                   <div className="flex-1 h-[220px] grid grid-cols-1 gap-4 sm:grid-cols-2 items-center">
                     <div className="h-full">
                       <ResponsiveContainer width="100%" height="100%">
                         <PieChart>
-                          <Pie data={emoPie7} dataKey="value" nameKey="name" outerRadius={85}>
+                          <Pie
+                            data={EMOTION_ORDER.map((k) => ({
+                              key: k,
+                              name: EMO_LABEL[k],
+                              value: Math.round(((emotionDist7?.[k] ?? 0) * 100)),
+                            }))}
+                            dataKey="value"
+                            nameKey="name"
+                            outerRadius={85}
+                          >
                             {EMOTION_ORDER.map((k) => (
                               <Cell key={k} fill={EMO_COLOR7[k]} />
                             ))}
@@ -557,7 +571,20 @@ function InsightCard({ title, subtitle, status, children }) {
           <h3 className="text-base font-semibold text-gray-900">{title}</h3>
           <p className="text-sm text-gray-600">{subtitle}</p>
         </div>
-        <span className="rounded-full bg-gray-100 px-3 py-1 text-xs text-gray-700">{status}</span>
+       <span
+        className={`rounded-full bg-gray-100 px-3 py-1 text-xs font-medium ${
+          status === "정상"
+           ? "text-emerald-600"
+           : status === "주의"
+           ? "text-amber-600"
+           : status === "경고"
+           ? "text-rose-600"
+           : "text-gray-700"
+        }`}
+        >
+  {status}
+</span>
+
       </div>
       {children}
     </motion.div>
