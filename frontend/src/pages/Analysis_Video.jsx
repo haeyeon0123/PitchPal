@@ -390,42 +390,60 @@ export default function Analysis_Video() {
                 <span className="text-sm text-gray-500">클릭하면 해당 시점으로 이동</span>
               </div>
 
-              <StripRow
-                label="머리방향"
-                data={poseLabels}
-                colorOf={(p) => (p === "상" ? STRIP_UP : p === "하" ? STRIP_DOWN : STRIP_FRONT)}
-                onClickIndex={seekTo}
-                tooltipOf={(p) => (p === "상" ? "고개를 위로 든 상태" : p === "하" ? "고개를 아래로 숙인 상태" : "시선이 정면")}
-              />
+              {/* 머리방향 스트립 */}
+<StripRow
+  label="머리방향"
+  data={poseLabels}
+  colorOf={(p) => (p === "상" ? STRIP_UP : p === "하" ? STRIP_DOWN : STRIP_FRONT)}
+  onClickIndex={seekTo}
+  tooltipOf={(p) => (p === "상" ? "고개를 위로 든 상태" : p === "하" ? "고개를 아래로 숙인 상태" : "시선이 정면")}
+/>
 
-              <div className="mt-3 h-44 w-full">
-                <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={earData} onClick={(e) => e && typeof e.activeLabel === "number" && seekTo(e.activeLabel)}>
-                    <CartesianGrid strokeDasharray="3 3" />
-                    <XAxis dataKey="t" tickFormatter={secToMMSS} interval={Math.floor(DURATION_SEC / 6)} />
-                    <YAxis domain={[0.05, 0.4]} />
-                    <RechartsTooltip
-                      content={({ active, payload, label }) => {
-                        if (!active || !payload?.length) return null;
-                        const val = payload[0]?.value;
-                        return (
-                          <div className="rounded-md bg-white/95 backdrop-blur border px-3 py-2 text-sm shadow">
-                            <div className="font-medium">{secToMMSS(label)} · EAR {val}</div>
-                            <div className="text-gray-500">값이 낮을수록 눈이 감김</div>
-                          </div>
-                        );
-                      }}
-                    />
-                    <ReferenceArea y1={0.18} y2={0.32} fill={COLOR_ACCENT} fillOpacity={0.08} />
-                    <Line type="monotone" dataKey="ear" stroke={COLOR_SECONDARY} dot={false} strokeWidth={2} />
-                  </LineChart>
-                </ResponsiveContainer>
-              </div>
+{/* 👇👇 여기부터 추가/교체: 아이콘 포함 캡션 + 간격 확보 */}
+<div className="mt-6 mb-1 flex items-center gap-2 text-sm font-medium text-gray-700">
+  <Eye className="h-4 w-4 text-indigo-500" />  {/* 👁️ Eye 아이콘 */}
+  <span>눈 깜빡임</span>
+</div>
 
-              {/* 감정 스트립: 7감정 분포 기반(시간축 없이 비율로 구획) */}
-              <div className="mt-3">
-                <EmotionStrip label="감정(7분포)" dist7={series.emotion_dist7} />
-              </div>
+<div className="h-44 w-full">
+  <ResponsiveContainer width="100%" height="100%">
+    <LineChart
+      data={earData}
+      onClick={(e) => e && typeof e.activeLabel === "number" && seekTo(e.activeLabel)}
+      margin={{ top: 10, right: 12, bottom: 8, left: 0 }}
+    >
+      <CartesianGrid strokeDasharray="3 3" />
+      <XAxis dataKey="t" tickFormatter={secToMMSS} interval={Math.floor(DURATION_SEC / 6)} />
+      <YAxis domain={[0.05, 0.4]} />
+      <RechartsTooltip
+        content={({ active, payload, label }) => {
+          if (!active || !payload?.length) return null;
+          const val = payload[0]?.value;
+          return (
+            <div className="rounded-md bg-white/95 backdrop-blur border px-3 py-2 text-sm shadow">
+              <div className="font-medium">{secToMMSS(label)} · 눈 깜빡임</div>
+              <div className="text-gray-500">EAR {val}</div>
+              <div className="text-xs text-gray-400">값이 낮을수록 눈이 감김</div>
+            </div>
+          );
+        }}
+      />
+      <ReferenceArea y1={0.18} y2={0.32} fill={COLOR_ACCENT} fillOpacity={0.08} />
+      <Line type="monotone" dataKey="ear" stroke={COLOR_SECONDARY} dot={false} strokeWidth={2} />
+    </LineChart>
+  </ResponsiveContainer>
+</div>
+
+
+
+             {/*
+                감정 스트립: 7감정 분포 기반(시간축 없이 비율로 구획)
+                <div className="mt-3">
+                  <EmotionStrip label="감정(7분포)" dist7={series.emotion_dist7} />
+                </div>
+            */}
+
+          
 
               {/* '감정(3버킷 타임라인)' 섹션 제거됨 */}
             </motion.div>
