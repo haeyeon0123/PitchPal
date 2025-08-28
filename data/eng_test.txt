@@ -1,0 +1,11 @@
+안녕하세요, 오늘 제 발표 주제는 AI-based Speech Training Service입니다.
+As you know, coommunication skillls are becoming more and more important in the modern workplace.
+저희 서비스는 사용자의 음성을 분석해서 발음, 억억양, 속도를 평가합니다.
+It also provides real-time feedback so that users can improve their presentation skills effectively.
+예를 들어, 사용자가 너무 빠르게 말하면, 시스템은 이렇게 알려줍니다:
+"Please slow doown, your speech rate is too fast."
+또한, 저희는 한글과 영어가 섞인 발표 상황를 고려했습니다.
+For example, in Korea, many students present in both Korean and English, sometimes switching within one sentence.
+마지막으로, 저희는 목표는 단순한 평가를 넘어서,
+to helping user build confidence and clarity in their speech.
+감사합니다. Thank you for listening.

@@ -3,6 +3,8 @@ numpy<2
 scipy
 scikit-learn
 joblib
+langdetect
+nltk
 
 # ==== ML/DL ====
 tensorflow
