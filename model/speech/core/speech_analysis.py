@@ -7,6 +7,7 @@ speech_analysis.py (patched + serialize.py 적용)
 - New  : utils.serialize(to_jsonable, dump_json) 사용으로 JSON 직렬화 통일
 """
 from __future__ import annotations
+from collections import Counter
 
 import os
 import librosa
@@ -119,6 +120,8 @@ def bucket_occurrences_by_segments(occurrences, segment_times):
     """
     per_seg = [[] for _ in segment_times]
     for word, s, e in occurrences or []:
+        if s is None or e is None:
+            continue
         for i, (ss, ee) in enumerate(segment_times):
             if s < ee and e > ss:       # 겹치면 해당 세그먼트에 부착
                 per_seg[i].append((word, float(s), float(e)))
@@ -185,6 +188,11 @@ def analyze_speech(audio_path: str, script_path: str, model=None, segment_durati
 
     # 7) 간투사(전역)
     filler_count, filler_occurrences = detect_filler_words(whisper_segments, stt_text)
+
+    # >>> 추가: 종류/빈도 요약
+    by_type_counter = Counter([w for (w, _s, _e) in (filler_occurrences or [])])
+    filler_types = sorted(by_type_counter.keys())
+    filler_by_type = {k: int(v) for k, v in by_type_counter.items()}
 
     # 8) 간투사를 세그먼트별로 버킷팅
     fillers_per_seg = bucket_occurrences_by_segments(filler_occurrences, segment_times)
@@ -268,6 +276,9 @@ def analyze_speech(audio_path: str, script_path: str, model=None, segment_durati
         "wpm": avg_wpm,
         "무음 구간 비율": pause_ratio,
         "간투사 수": int(filler_count),
+        # >>> 추가된 전역 요약
+        "간투사 종류": filler_types,         # 예: ["어","음","그"]
+        "간투사_빈도": filler_by_type,       # 예: {"어":3,"음":2,"그":1}
         "stt_result_url": stt_result_url,     # NEW
     }
 
