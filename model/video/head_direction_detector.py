@@ -1,19 +1,14 @@
+# video/head_direction_detector.py
 import cv2, json
+from pathlib import Path
+from typing import Dict, Any, List, Optional, Union
+
 import mediapipe as mp
 import numpy as np
 import pandas as pd
 
-VIDEO_PATH = r"C:\Users\lhy27\Desktop\20250524_172341.mp4"
-JSON_OUTPUT_PATH = r"model\video\head_pose_pitch_output.json"
-
-mp_face_mesh = mp.solutions.face_mesh
-face_mesh = mp_face_mesh.FaceMesh(static_image_mode=False, max_num_faces=1, refine_landmarks=True)
-
-cap = cv2.VideoCapture(VIDEO_PATH)
-fps = cap.get(cv2.CAP_PROP_FPS)
-total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-
-model_points = np.array([
+LANDMARK_IDS = [1, 152, 263, 33, 287, 57]
+MODEL_POINTS = np.array([
     (0.0, 0.0, 0.0),
     (0.0, -330.0, -65.0),
     (-225.0, 170.0, -135.0),
@@ -22,16 +17,16 @@ model_points = np.array([
     (150.0, -150.0, -125.0)
 ], dtype=np.float64)
 
-LANDMARK_IDS = [1, 152, 263, 33, 287, 57]
-
-def get_camera_matrix(frame_width, frame_height):
+def _camera_matrix(frame_width: int, frame_height: int) -> np.ndarray:
     focal_length = frame_width
-    center = (frame_width / 2, frame_height / 2)
+    center = (frame_width / 2.0, frame_height / 2.0)
     return np.array([[focal_length, 0, center[0]],
                      [0, focal_length, center[1]],
                      [0, 0, 1]], dtype="double")
 
-def classify_pitch(pitch_deg):
+def _classify_pitch(pitch_deg: Optional[float]) -> str:
+    if pitch_deg is None:
+        return "No face detected"
     if pitch_deg < -8:
         return "looking up"
     elif pitch_deg > 9:
@@ -39,79 +34,137 @@ def classify_pitch(pitch_deg):
     else:
         return "looking front"
 
-results_data = []
-frame_count = 0
-head_pose_counts = {"looking up":0, "looking front":0, "looking down":0}
+def analyze_head_pitch(
+    video_path: Union[str, Path],
+    *,
+    frame_stride: int = 1,
+    max_frames: Optional[int] = None,
+    save_raw: bool = True,
+    save_summary: bool = True,
+    output_dir: Union[str, Path] = "model/video",
+    raw_filename: str = "head_pose_pitch_output.json",
+    summary_filename: str = "head_pose_summary.json",
+    return_records: bool = True
+) -> Dict[str, Any]:
+    """
+    영상에서 얼굴 포즈의 pitch(상/정면/하) 추정. MediaPipe를 with 컨텍스트로 관리해
+    리소스를 안전하게 해제. 메모리 절약하려면 return_records=False 권장.
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-while cap.isOpened():
-    success, frame = cap.read()
-    if not success:
-        break
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise FileNotFoundError(f"❌ 영상 파일을 열 수 없습니다: {video_path}")
 
-    img_h, img_w = frame.shape[:2]
-    camera_matrix = get_camera_matrix(img_w, img_h)
-    dist_coeffs = np.zeros((4,1))
+    try:
+        fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
+        if fps <= 0:
+            raise RuntimeError("❌ FPS 값이 0 또는 비정상입니다.")
+        wait_ms = int(1000 / fps) if fps > 0 else 1
 
-    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    results = face_mesh.process(rgb_frame)
+        dist_coeffs = np.zeros((4, 1))
+        head_pose_counts = {"looking up": 0, "looking front": 0, "looking down": 0}
 
-    head_pose_text = "No face detected"
-    pitch_deg = None
+        with mp.solutions.face_mesh.FaceMesh(static_image_mode=False, max_num_faces=1, refine_landmarks=True) as face_mesh:
+            records: List[Dict[str, Any]] = [] if return_records else None
+            frame_idx = -1
+            processed = 0
 
-    if results.multi_face_landmarks:
-        landmarks = results.multi_face_landmarks[0].landmark
-        image_points = [(int(landmarks[idx].x * img_w), int(landmarks[idx].y * img_h)) for idx in LANDMARK_IDS]
-        image_points = np.array(image_points, dtype="double")
+            while True:
+                ok, frame = cap.read()
+                if not ok:
+                    break
+                frame_idx += 1
 
-        success_pnp, rotation_vector, translation_vector = cv2.solvePnP(
-            model_points, image_points, camera_matrix, dist_coeffs, flags=cv2.SOLVEPNP_ITERATIVE
-        )
+                # 프레임 스키핑
+                if frame_stride > 1 and (frame_idx % frame_stride != 0):
+                    continue
+                if max_frames is not None and processed >= max_frames:
+                    break
+                processed += 1
 
-        if success_pnp:
-            rotation_matrix, _ = cv2.Rodrigues(rotation_vector)
-            sy = np.sqrt(rotation_matrix[0,0]**2 + rotation_matrix[1,0]**2)
-            singular = sy < 1e-6
-            if not singular:
-                x = np.arctan2(rotation_matrix[2,1], rotation_matrix[2,2])
-            else:
-                x = np.arctan2(-rotation_matrix[1,2], rotation_matrix[1,1])
-            pitch_deg = np.degrees(x)
-            head_pose_text = classify_pitch(pitch_deg)
+                img_h, img_w = frame.shape[:2]
+                cam_mtx = _camera_matrix(img_w, img_h)
 
-    timestamp = frame_count / fps
-    results_data.append({
-        "frame": frame_count,
-        "time_sec": round(timestamp, 2),
-        "head_pose": head_pose_text,
-        "pitch_deg": round(pitch_deg, 2) if pitch_deg is not None else None
-    })
+                results = face_mesh.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
 
-    if head_pose_text in head_pose_counts:
-        head_pose_counts[head_pose_text] += 1
+                pitch_deg = None
+                label = "No face detected"
 
-    frame_count += 1
+                if results.multi_face_landmarks:
+                    lms = results.multi_face_landmarks[0].landmark
+                    image_points = np.array(
+                        [(int(lms[i].x * img_w), int(lms[i].y * img_h)) for i in LANDMARK_IDS],
+                        dtype="double"
+                    )
 
-    if cv2.waitKey(int(1000/fps)) & 0xFF == ord('q'):
-        break
+                    success_pnp, rvec, tvec = cv2.solvePnP(
+                        MODEL_POINTS, image_points, cam_mtx, dist_coeffs, flags=cv2.SOLVEPNP_ITERATIVE
+                    )
+                    if success_pnp:
+                        rmat, _ = cv2.Rodrigues(rvec)
+                        sy = np.sqrt(rmat[0, 0] ** 2 + rmat[1, 0] ** 2)
+                        singular = sy < 1e-6
+                        if not singular:
+                            x = np.arctan2(rmat[2, 1], rmat[2, 2])
+                        else:
+                            x = np.arctan2(-rmat[1, 2], rmat[1, 1])
+                        pitch_deg = float(np.degrees(x))
+                        label = _classify_pitch(pitch_deg)
 
-cap.release()
-face_mesh.close()
-cv2.destroyAllWindows()
+                if label in head_pose_counts:
+                    head_pose_counts[label] += 1
 
-# JSON 저장
-df = pd.DataFrame(results_data)
-df.to_json(JSON_OUTPUT_PATH, orient="records", force_ascii=False, indent=4)
-print(f"✅ JSON 저장 완료: {JSON_OUTPUT_PATH}")
+                if return_records:
+                    records.append({
+                        "frame": int(frame_idx),
+                        "time_sec": round(float(processed / fps), 2) if fps > 0 else None,
+                        "head_pose": label,
+                        "pitch_deg": round(pitch_deg, 2) if pitch_deg is not None else None
+                    })
 
-# 비율 계산 결과도 JSON 저장
-total = sum(head_pose_counts.values())
-if total > 0:
-    ratios = {
-        "looking down ratio": round(head_pose_counts["looking down"]/total, 3),
-        "looking front ratio": round(head_pose_counts["looking front"]/total, 3),
-        "looking up ratio": round(head_pose_counts["looking up"]/total, 3)
-    }
-    summary_path = r"model\video\head_pose_summary.json"
-    with open(summary_path, "w", encoding="utf-8") as f:
-        json.dump(ratios, f, ensure_ascii=False, indent=4)
-    print(f"✅ Head pose 비율 요약 저장: {summary_path}")
+                if cv2.waitKey(wait_ms) & 0xFF == ord('q'):
+                    break
+
+        # 요약 비율
+        total = sum(head_pose_counts.values())
+        ratios = None
+        if total > 0:
+            ratios = {
+                "looking down ratio": round(head_pose_counts["looking down"] / total, 3),
+                "looking front ratio": round(head_pose_counts["looking front"] / total, 3),
+                "looking up ratio": round(head_pose_counts["looking up"] / total, 3),
+            }
+
+        # 저장(옵션)
+        raw_path = None
+        summary_path = None
+        if save_raw and return_records:
+            df = pd.DataFrame(records)
+            raw_path = output_dir / raw_filename
+            df.to_json(raw_path, orient="records", force_ascii=False, indent=4)
+
+        if save_summary and ratios is not None:
+            summary_path = output_dir / summary_filename
+            with open(summary_path, "w", encoding="utf-8") as f:
+                json.dump(ratios, f, ensure_ascii=False, indent=4)
+
+        return {
+            "ratios": ratios,
+            "counts": head_pose_counts,
+            "raw_path": str(raw_path) if raw_path else None,
+            "summary_path": str(summary_path) if summary_path else None,
+            "records": records if return_records else None
+        }
+
+    finally:
+        # ===== 메모리/리소스 정리 =====
+        try:
+            cap.release()
+        except Exception:
+            pass
+        try:
+            cv2.destroyAllWindows()
+        except Exception:
+            pass
