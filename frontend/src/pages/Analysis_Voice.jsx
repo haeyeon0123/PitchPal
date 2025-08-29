@@ -206,13 +206,17 @@ function mapServiceToUi(api) {
   };
 
   const pronunciation_accuracy = normProb(
-    api?.pronunciation_accuracy ?? api?.["Pronunciation Accuracy"] ?? api?.발음_유사도_점수
+    api?.pronunciation_accuracy ??
+    api?.["Pronunciation Accuracy"] ??
+    (typeof api?.["발음 유사도 점수"] === "number"
+      ? (api["발음 유사도 점수"] > 1 ? api["발음 유사도 점수"] / 100 : api["발음 유사도 점수"])
+      : api?.발음_유사도_점수)
   );
 
   const wpm = Number(api?.wpm ?? api?.WPM ?? 0);
   const pause_ratio = Number(api?.pause_ratio ?? api?.["Pause Ratio"] ?? api?.무음_구간_비율 ?? 0);
 
-  // ✅ 간투사 총합: "Filler Count" → filler.total → filler_count → 간투사_수
+  // ✅ 간투사 총합: 다양한 경로 지원
   let filler_count = Number(
     api?.["Filler Count"] ??
     (api?.filler && typeof api.filler.total !== 'undefined' ? api.filler.total : undefined) ??
@@ -250,13 +254,13 @@ function mapServiceToUi(api) {
   })) : [];
 
   // ---- 간투사 occurrences 단일 소스 생성 ----
-  // 우선순위: **top-level `filler_occurrences`** → `filler.occurrences` → "Filler Words" → 구형 `api.fillers`
+  // 우선순위: top-level `filler_occurrences` → `filler.occurrences` → "Filler Words" → 구형 `api.fillers`
   let filler_occurrences = [];
   if (Array.isArray(api?.filler_occurrences)) {
     filler_occurrences = api.filler_occurrences
       .map(o => {
         const start = Number(o.start ?? o.start_sec ?? NaN);
-        const end   = Number(o.end ?? o.end_sec ?? NaN);
+        const end   = Number(o.end   ?? o.end_sec   ?? NaN);
         const time  = Number.isFinite(o.time) ? Number(o.time)
                     : (Number.isFinite(start) && Number.isFinite(end)) ? (start + end) / 2 : NaN;
         const word  = String(o.word ?? o.type ?? 'F');
@@ -267,7 +271,7 @@ function mapServiceToUi(api) {
     filler_occurrences = api.filler.occurrences
       .map(o => {
         const start = Number(o.start ?? o.start_sec ?? NaN);
-        const end   = Number(o.end ?? o.end_sec ?? NaN);
+        const end   = Number(o.end   ?? o.end_sec   ?? NaN);
         const time  = Number.isFinite(o.time) ? Number(o.time)
                     : (Number.isFinite(start) && Number.isFinite(end)) ? (start + end) / 2 : NaN;
         const word  = String(o.word ?? o.type ?? 'F');
@@ -275,7 +279,6 @@ function mapServiceToUi(api) {
       })
       .filter(Boolean);
   } else if (Array.isArray(api?.["Filler Words"])) {
-    // total_temp.py 스타일: [word, start, end]
     filler_occurrences = api["Filler Words"]
       .map(a => Array.isArray(a) && a.length >= 3
         ? { time_sec: (Number(a[1]) + Number(a[2])) / 2, word: String(a[0]) }
@@ -293,9 +296,29 @@ function mapServiceToUi(api) {
       .filter(Boolean);
   }
 
-  // 총합이 없고 occurrences가 있으면 길이로 보정
+  // ---- 간투사 종류별 집계 ----
+  let filler_counts_by_type = null;
+  if (api?.filler?.by_type && typeof api.filler.by_type === 'object') {
+    filler_counts_by_type = api.filler.by_type;
+  } else if (api?.summary?.fillers_by_type && typeof api.summary.fillers_by_type === 'object') {
+    filler_counts_by_type = api.summary.fillers_by_type;
+  } else if (api?.["간투사_빈도"] && typeof api["간투사_빈도"] === 'object') {
+    filler_counts_by_type = api["간투사_빈도"];
+  } else if (filler_occurrences.length) {
+    const m = {};
+    for (const oc of filler_occurrences) {
+      const w = String(oc.word ?? '기타');
+      m[w] = (m[w] || 0) + 1;
+    }
+    filler_counts_by_type = m;
+  }
+
+  // 총합 보정: occurrences/종류별 합으로 백업
   if ((!Number.isFinite(filler_count) || filler_count === 0) && filler_occurrences.length) {
     filler_count = filler_occurrences.length;
+  }
+  if ((!Number.isFinite(filler_count) || filler_count === 0) && filler_counts_by_type && Object.keys(filler_counts_by_type).length) {
+    filler_count = Object.values(filler_counts_by_type).reduce((a, b) => a + Number(b || 0), 0);
   }
 
   // ---- 레이더 스코어(0~5) ----
@@ -334,6 +357,7 @@ function mapServiceToUi(api) {
 
     // ✅ 하단 분석에서 사용할 단일 소스
     filler_occurrences,
+    filler_counts_by_type,
 
     // KPI 블록
     kpi: {
@@ -408,23 +432,60 @@ export default function AnalysisVoice() {
         if (segResp.ok) {
           const seg = await segResp.json();
 
-          // 침묵/세그먼트 보강
-          if (Array.isArray(seg?.silence)) api.silence = seg.silence;
-          if (Array.isArray(seg?.segments) && !api.segments) api.segments = seg.segments;
+          // === segments.json → 프론트 표준 구조로 통합 ===
+          // 1) 세그먼트/침묵
+          if (Array.isArray(seg?.segments)) {
+            api.segments = seg.segments; // 각 seg.fillers: [(word,start,end)], seg.silence: [(s,e)]
+          }
+          if (Array.isArray(seg?.silence)) {
+            api.silence = seg.silence;   // 있으면 반영 (없어도 OK)
+          }
 
-          // 요약 집계가 있으면 넘겨줌
-          if (typeof seg?.summary?.filler_count === 'number') {
+          // 2) 간투사 총합 (간투사 수)
+          const totalFromSeg =
+            (typeof seg?.["간투사 수"] === 'number' ? seg["간투사 수"] : null) ??
+            (typeof seg?.filler_count === 'number' ? seg.filler_count : null) ??
+            (typeof seg?.summary?.filler_count === 'number' ? seg.summary.filler_count : null) ??
+            (typeof seg?.filler?.total === 'number' ? seg.filler.total : null);
+          if (typeof totalFromSeg === 'number') {
+            api.filler_count = totalFromSeg;
             api.filler = api.filler || {};
-            api.filler.total = seg.summary.filler_count;
+            api.filler.total = totalFromSeg;
           }
-          if (seg?.summary?.fillers_by_type) {
+
+          // 3) 간투사 종류별 집계 (간투사_빈도 / by_type / summary.fillers_by_type)
+          const byTypeFromSeg =
+            (seg?.["간투사_빈도"] && typeof seg["간투사_빈도"] === 'object' ? seg["간투사_빈도"] : null) ??
+            (seg?.filler?.by_type && typeof seg.filler.by_type === 'object' ? seg.filler.by_type : null) ??
+            (seg?.summary?.fillers_by_type && typeof seg.summary.fillers_by_type === 'object' ? seg.summary.fillers_by_type : null);
+          if (byTypeFromSeg) {
             api.filler = api.filler || {};
-            api.filler.by_type = seg.summary.fillers_by_type;
+            api.filler.by_type = byTypeFromSeg;
           }
-          if (Array.isArray(seg?.filler?.occurrences)) {
-            // 참고: mapServiceToUi가 filler.occurrences도 읽는다.
-            api.filler = api.filler || {};
-            api.filler.occurrences = seg.filler.occurrences;
+
+          // 4) 간투사 발생 리스트: seg.segments[*].fillers → [{word,start,end}]로 정규화
+          if (Array.isArray(seg?.segments)) {
+            const occ = [];
+            for (const s of seg.segments) {
+              const arr = Array.isArray(s?.fillers) ? s.fillers : [];
+              for (const tup of arr) {
+                if (!Array.isArray(tup) || tup.length < 3) continue;
+                const word = String(tup[0]);
+                const start = Number(tup[1]);
+                const end   = Number(tup[2]);
+                if (Number.isFinite(start) && Number.isFinite(end)) {
+                  occ.push({ word, start, end });
+                }
+              }
+            }
+            if (occ.length) {
+              api.filler = api.filler || {};
+              api.filler.occurrences = occ;
+              if (typeof api.filler_count !== 'number') {
+                api.filler_count = occ.length;
+                api.filler.total = occ.length;
+              }
+            }
           }
         }
       } catch (_) {}
@@ -776,10 +837,12 @@ function ChartsBlock({ result, audioRef }) {
 
   const segments = result?.segments?.length ? result.segments : DUMMY_SEGMENTS;
 
-  // ✅ 간투사: 단일 소스(result.filler_occurrences)만 사용
-  const fillerOccurrences = Array.isArray(result?.filler_occurrences)
-    ? result.filler_occurrences
-    : [];
+  // ✅ 간투사 occurrences
+  const fillerOccurrences = React.useMemo(() => {
+    return Array.isArray(result?.filler_occurrences)
+      ? result.filler_occurrences
+      : [];
+  }, [result?.filler_occurrences]);
 
   // 침묵: 기존 로직 유지
   const silenceIntervals = React.useMemo(() => {
@@ -804,8 +867,14 @@ function ChartsBlock({ result, audioRef }) {
 
   const pauseRatioPct = Number((result?.features?.pause_ratio ?? 0) * 100);
 
-  // 종류 리스트 집계 (어/음/그…)
+  // 종류 리스트 집계 (by_type가 있으면 우선 사용, 없으면 occurrences로 계산)
   const fillerItems = React.useMemo(() => {
+    if (result?.filler_counts_by_type && typeof result.filler_counts_by_type === 'object') {
+      return Object.entries(result.filler_counts_by_type)
+        .map(([word, count]) => ({ word, count: Number(count || 0) }))
+        .sort((a, b) => b.count - a.count)
+        .slice(0, 6);
+    }
     const m = new Map();
     (fillerOccurrences || []).forEach(f => {
       const w = String(f.word ?? '기타');
@@ -814,7 +883,7 @@ function ChartsBlock({ result, audioRef }) {
     return Array.from(m, ([word, count]) => ({ word, count }))
       .sort((a, b) => b.count - a.count)
       .slice(0, 6);
-  }, [fillerOccurrences]);
+  }, [result?.filler_counts_by_type, fillerOccurrences]);
 
   return (
     <div className="space-y-4">
