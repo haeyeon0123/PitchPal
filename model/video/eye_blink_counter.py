@@ -1,15 +1,17 @@
-import cv2, json
-import mediapipe as mp
-import math
-import pandas as pd
-import time
+import cv2, json, math, time
 from datetime import datetime
+from pathlib import Path
+from typing import Dict, Any, List, Optional, Tuple, Union
 
-def euclidean_distance(p1, p2):
+import mediapipe as mp
+import pandas as pd
+
+# ===== Utils =====
+def euclidean_distance(p1, p2) -> float:
     return math.sqrt((p1[0]-p2[0])**2 + (p1[1]-p2[1])**2)
 
 # 눈 깜빡임 평가 함수
-def blink_frequency_grade(blinks_per_min):
+def blink_frequency_grade(blinks_per_min: float) -> Tuple[str, str]:
     if 10 <= blinks_per_min <= 20:
         return "정상", "안정된 상태"
     elif 21 <= blinks_per_min <= 30:
@@ -20,7 +22,7 @@ def blink_frequency_grade(blinks_per_min):
         return "정보 부족", ""
 
 # EAR 계산
-def calculate_ear(landmarks, eye_indices):
+def calculate_ear(landmarks, eye_indices) -> Optional[float]:
     p1 = landmarks[eye_indices[0]]
     p2 = landmarks[eye_indices[1]]
     p3 = landmarks[eye_indices[2]]
@@ -37,102 +39,148 @@ def calculate_ear(landmarks, eye_indices):
 # 상수
 LEFT_EYE_IDX = [33, 160, 158, 133, 153, 144]
 RIGHT_EYE_IDX = [362, 385, 387, 263, 373, 380]
-EAR_THRESHOLD = 0.21
-CLOSED_FRAMES = 1
 
-# MediaPipe 초기화
-mp_face_mesh = mp.solutions.face_mesh
-face_mesh = mp_face_mesh.FaceMesh(max_num_faces=1)
-blink_count = 0
-frame_idx = 0
-frame_counter = 0
-start_time = time.time()
+DEFAULT_EAR_THRESHOLD = 0.21
+DEFAULT_CLOSED_FRAMES = 1
 
-results = []
+def analyze_eye_blink(
+    video_path: Union[str, Path],
+    *,
+    ear_threshold: float = DEFAULT_EAR_THRESHOLD,
+    closed_frames: int = DEFAULT_CLOSED_FRAMES,
+    frame_stride: int = 1,           # e.g., 2면 1프레임 건너뜀
+    max_frames: Optional[int] = None, # 최대 처리 프레임 수 제한
+    save_raw: bool = True,            # 프레임별 결과 JSON 저장
+    save_summary: bool = True,        # 요약 JSON 저장
+    output_dir: Union[str, Path] = "model/video",
+    raw_filename: str = "blink_data.json",
+    summary_filename: str = "eye_blink_analysis_summary.json",
+    return_records: bool = True       # 메모리로 결과 리스트 반환 여부
+) -> Dict[str, Any]:
+    """
+    영상에서 EAR 기반 깜빡임을 감지하고 결과를 파일로 저장/반환합니다.
+    메모리 사용을 줄이려면 return_records=False 로 설정하세요.
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-video_path = r"C:\Users\lhy27\Desktop\졸프\20250522_154521.mp4"
-cap = cv2.VideoCapture(video_path)
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise FileNotFoundError(f"❌ 영상 파일을 열 수 없습니다: {video_path}")
 
-if not cap.isOpened():
-    print("❌ 영상 파일을 열 수 없습니다.")
-    exit()
+    try:
+        fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
+        if fps <= 0:
+            raise RuntimeError("❌ FPS 값이 0 또는 비정상입니다.")
 
-fps = cap.get(cv2.CAP_PROP_FPS)
-if fps == 0:
-    print("❌ FPS 값이 0입니다.")
-    exit()
+        wait_time_ms = int(1000 / fps) if fps > 0 else 1
 
-wait_time = int(1000 / fps)
-
-while cap.isOpened():
-    ret, frame = cap.read()
-    if not ret:
-        break
-
-    frame_idx += 1
-    h, w = frame.shape[:2]
-    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    result = face_mesh.process(rgb_frame)
-
-    if result.multi_face_landmarks:
-        landmarks = result.multi_face_landmarks[0].landmark
-        points = [(int(lm.x * w), int(lm.y * h)) for lm in landmarks]
-
-        left_ear = calculate_ear(points, LEFT_EYE_IDX)
-        right_ear = calculate_ear(points, RIGHT_EYE_IDX)
-
-        blink = False
-        if left_ear is not None and right_ear is not None:
-            avg_ear = (left_ear + right_ear) / 2
-        else:
-            avg_ear = None
-
-        if avg_ear is not None and avg_ear < EAR_THRESHOLD:
-            frame_counter += 1
-        else:
-            if frame_counter >= CLOSED_FRAMES:
-                blink = True
-                blink_count += 1
+        # MediaPipe는 with 컨텍스트로 관리 → close() 자동 호출(메모리 반환)
+        with mp.solutions.face_mesh.FaceMesh(max_num_faces=1) as face_mesh:
+            blink_count = 0
+            frame_idx = -1
             frame_counter = 0
+            start_time = time.time()
 
-        elapsed = time.time() - start_time
-        bps = blink_count / elapsed if elapsed > 0 else 0
-        bpm = bps * 60
+            records: List[Dict[str, Any]] = [] if return_records else None
 
-        results.append({
-            "프레임": frame_idx,
-            "EAR": round(avg_ear, 4) if avg_ear is not None else None,
-            "눈 깜빡임": "O" if blink else "X"
-        })
+            processed = 0
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                frame_idx += 1
 
-    if cv2.waitKey(wait_time) & 0xFF == ord('q'):
-        break
+                # 프레임 스키핑
+                if frame_stride > 1 and (frame_idx % frame_stride != 0):
+                    continue
+                if max_frames is not None and processed >= max_frames:
+                    break
+                processed += 1
 
-cap.release()
-cv2.destroyAllWindows()
+                h, w = frame.shape[:2]
+                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                result = face_mesh.process(rgb_frame)
 
-# 분석 요약
-total_time_sec = frame_idx / fps
-total_time_min = total_time_sec / 60
-blinks_per_min = blink_count / total_time_min
-duration_str = f"{int(total_time_sec // 60)}분 {int(total_time_sec % 60)}초"
-blink_grade, blink_interpretation = blink_frequency_grade(blinks_per_min)
+                blink = False
+                avg_ear = None
 
-summary = {
-    "분석 영상 길이": duration_str,
-    "눈 깜빡임 횟수": blink_count,
-    "눈 깜빡임 빈도 (회/분)": round(blinks_per_min, 2),
-    "눈 깜빡임 평가 등급": blink_grade,
-    "눈 깜빡임 해석": blink_interpretation
-}
+                if result.multi_face_landmarks:
+                    lms = result.multi_face_landmarks[0].landmark
+                    points = [(int(lm.x * w), int(lm.y * h)) for lm in lms]
 
-# JSON 저장
-df = pd.DataFrame(results)
-json_path = r"model\video\blink_data.json"
-df.to_json(json_path, orient="records", force_ascii=False, indent=4)
+                    left_ear = calculate_ear(points, LEFT_EYE_IDX)
+                    right_ear = calculate_ear(points, RIGHT_EYE_IDX)
+                    if left_ear is not None and right_ear is not None:
+                        avg_ear = (left_ear + right_ear) / 2.0
 
-summary_path = r"model\video\eye_blink_analysis_summary.json"
-with open(summary_path, "w", encoding="utf-8") as f:
-    json.dump(summary, f, ensure_ascii=False, indent=4)
+                    if (avg_ear is not None) and (avg_ear < ear_threshold):
+                        frame_counter += 1
+                    else:
+                        if frame_counter >= closed_frames:
+                            blink = True
+                            blink_count += 1
+                        frame_counter = 0
 
-print(f"\n✅ 결과 JSON 저장 완료: {json_path}, {summary_path}")
+                # 기록(메모리 절약 필요 시 끄기)
+                if return_records:
+                    records.append({
+                        "frame": int(frame_idx),
+                        "EAR": round(float(avg_ear), 4) if avg_ear is not None else None,
+                        "blink": bool(blink),
+                    })
+
+                # UI 이벤트 루프 (headless 환경이면 의미 없음)
+                if cv2.waitKey(wait_time_ms) & 0xFF == ord('q'):
+                    break
+
+        total_time_sec = processed / fps if fps > 0 else 0.0
+        total_time_min = total_time_sec / 60.0 if total_time_sec > 0 else 0.0
+        blinks_per_min = (blink_count / total_time_min) if total_time_min > 0 else 0.0
+
+        duration_str = f"{int(total_time_sec // 60)}분 {int(total_time_sec % 60)}초"
+        blink_grade, blink_interpretation = blink_frequency_grade(blinks_per_min)
+
+        summary = {
+            "분석 영상 길이": duration_str,
+            "처리 프레임 수": int(processed),
+            "프레임 스키핑": int(frame_stride),
+            "눈 깜빡임 횟수": int(blink_count),
+            "눈 깜빡임 빈도 (회/분)": round(float(blinks_per_min), 2),
+            "눈 깜빡임 평가 등급": blink_grade,
+            "눈 깜빡임 해석": blink_interpretation
+        }
+
+        # 저장(옵션)
+        raw_path = None
+        summary_path = None
+
+        if save_raw and return_records:
+            # DataFrame으로 저장 (orient="records")
+            df = pd.DataFrame(records)
+            raw_path = output_dir / raw_filename
+            df.to_json(raw_path, orient="records", force_ascii=False, indent=4)
+
+        if save_summary:
+            summary_path = output_dir / summary_filename
+            with open(summary_path, "w", encoding="utf-8") as f:
+                json.dump(summary, f, ensure_ascii=False, indent=4)
+
+        # 반환
+        return {
+            "summary": summary,
+            "raw_path": str(raw_path) if raw_path else None,
+            "summary_path": str(summary_path) if summary_path else None,
+            "records": records if return_records else None
+        }
+
+    finally:
+        # ===== 메모리/리소스 정리 =====
+        try:
+            cap.release()
+        except Exception:
+            pass
+        try:
+            cv2.destroyAllWindows()
+        except Exception:
+            pass
