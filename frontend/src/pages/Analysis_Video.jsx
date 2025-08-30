@@ -48,6 +48,42 @@ const EMO_COLOR7 = {
   happy:"#FBE5B5", sad:"#D6E8FA", surprised:"#FADBC6", neutral:"#E6EEF5"
 };
 
+/* ===== 감정 피드백 계산(프론트 전용) ===== */
+const EMO_KO = {
+  angry: "분노",
+  disgust: "혐오",
+  scared: "두려움",
+  happy: "미소",
+  sad: "슬픔",
+  surprised: "놀람",
+  neutral: "중립",
+};
+const DEFAULT_STABLE_MSG = "적절하고 안정감있는 표정을 잘 유지하고 있습니다.";
+const WARNING_MESSAGES = {
+  angry: "화난 표정 비중이 높아요. 보다 평온하고 중립적인 표정 연습을 권합니다.",
+  disgust: "불쾌한 표정 비중이 높아요. 보다 평온하고 중립적인 표정 연습을 권합니다.",
+  scared: "두려운 표정 비중이 높아요. 보다 평온하고 중립적인 표정 연습을 권합니다.",
+  sad: "슬픈 표정 비중이 높아요. 보다 평온하고 중립적인 표정 연습을 권합니다.",
+  surprised: "놀란 표정 비중이 높아요. 보다 평온하고 중립적인 표정 연습을 권합니다.",
+};
+function pickMostCommonEmotion(dist) {
+  if (!dist) return null;
+  let top = null, topVal = -Infinity;
+  for (const [k, v] of Object.entries(dist)) {
+    const val = typeof v === "number" ? v : Number(v) || 0;
+    if (val > topVal) { top = k; topVal = val; }
+  }
+  return top;
+}
+function computeEmotionFeedback(emotion_dist7, most_common_emotion) {
+  const emo = (most_common_emotion || pickMostCommonEmotion(emotion_dist7) || "").toLowerCase();
+  if (!emo) return { badge: "감정 분석", msg: "표정 신호를 전체적으로 안정적으로 사용하고 있어요.", isGood: false };
+  const badge = `${EMO_KO[emo] || emo} 우세`;
+  const isGood = (emo === "neutral" || emo === "happy");
+  const msg = isGood ? DEFAULT_STABLE_MSG : (WARNING_MESSAGES[emo] || DEFAULT_STABLE_MSG);
+  return { badge, msg, isGood };
+}
+
 /* ===================== Helpers ===================== */
 const secToMMSS = (s) => {
   const m = Math.floor(s / 60).toString().padStart(2, "0");
@@ -142,6 +178,80 @@ function gradeStyle(grade) {
   }
 }
 
+/* ====== HeadPose 정규화 (추가) ====== */
+// - data.head_pose: { ratios, counts, records }
+// - data.head_pose_summary: { ...ratios... }
+// - data.head_pose_records: [ {time_sec, head_pose, pitch_deg}, ... ]
+// - 또는 일반 필드(ratios/records/counts)만 존재해도 처리
+function normalizeHeadPose(data) {
+  if (!data || typeof data !== "object") return null;
+
+  const hp = data.head_pose || null;
+
+  const ratios =
+    (hp && hp.ratios) ||
+    data.head_pose_summary ||
+    data.ratios ||
+    null;
+
+  const recs =
+    (hp && hp.records) ||
+    data.head_pose_records ||
+    data.records ||
+    null;
+
+  const counts =
+    (hp && hp.counts) ||
+    data.head_pose_counts ||
+    data.counts ||
+    null;
+
+  // 영문 → 국문 키 변환
+  const toKorRatio = (r) => {
+    if (!r) return null;
+    const ld = r["looking down ratio"] ?? r.looking_down_ratio ?? r.down ?? 0;
+    const lf = r["looking front ratio"] ?? r.looking_front_ratio ?? r.front ?? 0;
+    const lu = r["looking up ratio"] ?? r.looking_up_ratio ?? r.up ?? 0;
+    return {
+      하: typeof ld === "number" ? ld : 0,
+      정면: typeof lf === "number" ? lf : 0,
+      상: typeof lu === "number" ? lu : 0,
+    };
+  };
+
+  const korRatios = toKorRatio(ratios);
+
+  // records → 초 단위 인덱스 배열로 정규화(“상/정면/하”)
+  let labels = null;
+  if (Array.isArray(recs) && recs.length) {
+    const maxIdx = Math.max(
+      ...recs.map((r, i) =>
+        typeof r.time_sec === "number" ? Math.floor(r.time_sec) : i
+      )
+    );
+    const arr = new Array(maxIdx + 1).fill("정면");
+    recs.forEach((r, i) => {
+      const pos = typeof r.time_sec === "number" ? Math.floor(r.time_sec) : i;
+      const label =
+        r.head_pose === "looking up"
+          ? "상"
+          : r.head_pose === "looking down"
+          ? "하"
+          : r.head_pose === "looking front"
+          ? "정면"
+          : "정면";
+      if (pos >= 0 && pos < arr.length) arr[pos] = label;
+    });
+    labels = arr;
+  }
+
+  return {
+    ratios: korRatios, // {하, 정면, 상} | null
+    labels,            // ["정면","상","정면",...] | null
+    counts,            // 선택 사용
+  };
+}
+
 /* ===================== Main ===================== */
 export default function Analysis_Video() {
   const [phase, setPhase] = useState("idle");
@@ -155,7 +265,8 @@ export default function Analysis_Video() {
   const [notice, setNotice] = useState("");
 
   const DEMO_LEN = 118;
-  const [series, setSeries] = useState(() => genDummySeries(DEMO_LEN));
+  // ✅ headPose 초기값 추가
+  const [series, setSeries] = useState(() => ({ ...genDummySeries(DEMO_LEN), headPose: null }));
   const DURATION_SEC = series?.ear?.length || DEMO_LEN;
 
   // 👇 깜빡임 요약(팀원 JSON) 상태
@@ -176,15 +287,33 @@ export default function Analysis_Video() {
     [blinkEvents.length, DURATION_SEC]
   );
 
-  const poseLabels = useMemo(() => (series.pitch || []).map(pitchToPose), [series.pitch]);
+  // ✅ headPose 우선 사용
+  const poseLabels = useMemo(() => {
+    if (series.headPose?.labels?.length) return series.headPose.labels;
+    if (series.headPose?.ratios && (series.pitch?.length || 0) > 0) {
+      const r = series.headPose.ratios;
+      const dominant =
+        (r.정면 ?? 0) >= (r.상 ?? 0) && (r.정면 ?? 0) >= (r.하 ?? 0)
+          ? "정면"
+          : (r.상 ?? 0) >= (r.하 ?? 0)
+          ? "상"
+          : "하";
+      return new Array(series.pitch.length).fill(dominant);
+    }
+    return (series.pitch || []).map(pitchToPose);
+  }, [series.headPose, series.pitch]);
+
   const poseCounts = useMemo(() => {
     const c = { 상: 0, 정면: 0, 하: 0 };
     poseLabels.forEach((p) => c[p]++);
     return c;
   }, [poseLabels]);
-  const poseRatio = useMemo(() => ratio(poseCounts), [poseCounts]);
 
-  /* ===== 7감정 분포(백엔드 distribution/counts → ratio로 변환) ===== */
+  const poseRatio = useMemo(() => {
+    if (series.headPose?.ratios) return series.headPose.ratios;
+    return ratio(poseCounts);
+  }, [series.headPose, poseCounts]);
+
   const emotionDist7 = useMemo(() => {
     if (series.emotion_dist7) return series.emotion_dist7; // 이미 ratio
     return null;
@@ -208,7 +337,7 @@ export default function Analysis_Video() {
     setProgress(0);
     setNotice("");
     setPhase("idle");
-    setSeries(genDummySeries(DEMO_LEN));
+    setSeries({ ...genDummySeries(DEMO_LEN), headPose: null });
     setBlinkSummary(null);
   }, []);
 
@@ -260,7 +389,7 @@ export default function Analysis_Video() {
         EMOTION_ORDER.forEach(k => emotion_dist7[k] = (counts[k]||0)/total);
       }
 
-      // 경고/요약
+      // 경고/요약(서버 제공값은 무시 가능하지만, fallback으로 저장)
       const emotion_warning = data?.warning || "";
       const most_common_emotion = data?.most_common_emotion || null;
       const negative_ratio = (typeof data?.negative_emotion_ratio === "number")
@@ -279,16 +408,28 @@ export default function Analysis_Video() {
         setBlinkSummary(normalizeBlinkSummary(rawBlink));
       } else {
         // 서버에 요약이 없으면, 로컬 계산값으로 최소한의 더미 구성
+        const localCount = detectBlinks(ear || []).length;
+        const localFreq = Math.round(((localCount || 0) / Math.max(1, (ear?.length || 1) / 60)) * 10) / 10;
         setBlinkSummary(normalizeBlinkSummary({
-          "눈 깜빡임 횟수": detectBlinks(ear || []).length,
-          "눈 깜빡임 빈도 (회/분)": blinksPerMinLocal,
-          "눈 깜빡임 평가 등급": (blinksPerMinLocal>=10 && blinksPerMinLocal<=20) ? "정상" : blinksPerMinLocal<10 ? "낮음" : "주의",
-          "눈 깜빡임 해석": blinksPerMinLocal>=10 && blinksPerMinLocal<=20 ? "안정된 상태" : blinksPerMinLocal>=21 ? "약간의 긴장 상태" : "",
+          "눈 깜빡임 횟수": localCount,
+          "눈 깜빡임 빈도 (회/분)": localFreq,
+          "눈 깜빡임 평가 등급": (localFreq>=10 && localFreq<=20) ? "정상" : localFreq<10 ? "낮음" : "주의",
+          "눈 깜빡임 해석": localFreq>=10 && localFreq<=20 ? "안정된 상태" : localFreq>=21 ? "약간의 긴장 상태" : "",
         }));
       }
 
-      if (!ear.length && !pitch.length && !emotion_dist7) {
-        throw new Error("서버 응답에 분석 결과가 없습니다.(ear/pitch/distribution)");
+      // ✅ 고개 각도(head pose) 파싱 (추가)
+      const headPose = normalizeHeadPose({
+        head_pose: data?.head_pose,
+        head_pose_summary: data?.head_pose_summary,
+        head_pose_records: data?.head_pose_records,
+        ratios: data?.ratios,
+        records: data?.records,
+        counts: data?.counts,
+      });
+
+      if (!ear.length && !pitch.length && !emotion_dist7 && !headPose) {
+        throw new Error("서버 응답에 분석 결과가 없습니다.(ear/pitch/distribution/head_pose)");
       }
 
       setSeries({
@@ -298,6 +439,7 @@ export default function Analysis_Video() {
         emotion_warning,
         most_common_emotion,
         negative_ratio,
+        headPose, // ✅ 추가
       });
 
       setProgress(100);
@@ -307,7 +449,7 @@ export default function Analysis_Video() {
       setNotice(
         "분석 API 호출 실패 → 예시 데이터로 표시합니다. 엔드포인트/파라미터를 확인해주세요."
       );
-      setSeries(genDummySeries(DEMO_LEN));
+      setSeries({ ...genDummySeries(DEMO_LEN), headPose: null });
       setBlinkSummary(normalizeBlinkSummary({
         "눈 깜빡임 횟수": 12,
         "눈 깜빡임 빈도 (회/분)": 22.3,
@@ -317,7 +459,7 @@ export default function Analysis_Video() {
       setProgress(100);
       setPhase("done");
     }
-  }, [fileObj, blinksPerMinLocal]);
+  }, [fileObj]);
 
   const onRestart = useCallback(() => {
     if (videoRef.current) { videoRef.current.currentTime = 0; videoRef.current.pause(); }
@@ -332,8 +474,11 @@ export default function Analysis_Video() {
     }
   };
 
-  // (예시) 아래 경고는 실제 로직으로 교체 가능
-  const tiltDownPct = 6;
+  // ✅ 프론트 계산 감정 배지/문구(+ good 여부)
+  const { badge: emotionBadge, msg: emotionMsg, isGood: isEmotionGood } = computeEmotionFeedback(
+    series.emotion_dist7,
+    series.most_common_emotion
+  );
 
   return (
     <div className="bg-gradient-to-b from-white to-[#f7f9fc]">
@@ -391,70 +536,55 @@ export default function Analysis_Video() {
               </div>
 
               {/* 머리방향 스트립 */}
-<StripRow
-  label="머리방향"
-  data={poseLabels}
-  colorOf={(p) => (p === "상" ? STRIP_UP : p === "하" ? STRIP_DOWN : STRIP_FRONT)}
-  onClickIndex={seekTo}
-  tooltipOf={(p) => (p === "상" ? "고개를 위로 든 상태" : p === "하" ? "고개를 아래로 숙인 상태" : "시선이 정면")}
-/>
+              <StripRow
+                label="머리방향"
+                data={poseLabels}
+                colorOf={(p) => (p === "상" ? STRIP_UP : p === "하" ? STRIP_DOWN : STRIP_FRONT)}
+                onClickIndex={seekTo}
+                tooltipOf={(p) => (p === "상" ? "고개를 위로 든 상태" : p === "하" ? "고개를 아래로 숙인 상태" : "시선이 정면")}
+              />
 
-{/* 👇👇 여기부터 추가/교체: 아이콘 포함 캡션 + 간격 확보 */}
-{/* 👁️ 눈 깜빡임 섹션 */}
-<div className="mt-6 rounded-xl border p-3">
-  <div className="mb-2 flex items-center gap-2 text-sm font-medium text-gray-800">
-    <Eye className="h-4 w-4 text-gray-500" />
-    <span>눈 깜빡임</span>
-  </div>
-  <div className="h-44 w-full">
-    <ResponsiveContainer width="100%" height="100%">
-      <LineChart
-        data={earData}
-        onClick={(e) => e && typeof e.activeLabel === "number" && seekTo(e.activeLabel)}
-        margin={{ top: 10, right: 12, bottom: 8, left: 0 }}
-      >
-        <CartesianGrid strokeDasharray="3 3" />
-        <XAxis dataKey="t" tickFormatter={secToMMSS} interval={Math.floor(DURATION_SEC / 6)} />
-        <YAxis domain={[0.05, 0.4]} />
-        <RechartsTooltip
-          content={({ active, payload, label }) => {
-            if (!active || !payload?.length) return null;
-            const val = payload[0]?.value;
-            return (
-              <div className="rounded-md bg-white/95 backdrop-blur border px-3 py-2 text-sm shadow">
-                <div className="font-medium">{secToMMSS(label)} · 눈 깜빡임</div>
-                <div className="text-gray-500">EAR {val}</div>
-                <div className="text-xs text-gray-400">값이 낮을수록 눈이 감김</div>
-              </div>
-            );
-          }}
-        />
-        <ReferenceArea y1={0.18} y2={0.32} fill={COLOR_ACCENT} fillOpacity={0.08} />
-        <Line
-          type="monotone"
-          dataKey="ear"
-          stroke={COLOR_SECONDARY}
-          dot={false}
-          strokeWidth={2}
-        />
-      </LineChart>
-    </ResponsiveContainer>
-  </div>
-</div>
-
-
-
-
-             {/*
-                감정 스트립: 7감정 분포 기반(시간축 없이 비율로 구획)
-                <div className="mt-3">
-                  <EmotionStrip label="감정(7분포)" dist7={series.emotion_dist7} />
+              {/* 👁️ 눈 깜빡임 섹션 */}
+              <div className="mt-6 rounded-xl border p-3">
+                <div className="mb-2 flex items-center gap-2 text-sm font-medium text-gray-800">
+                  <Eye className="h-4 w-4 text-gray-500" />
+                  <span>눈 깜빡임</span>
                 </div>
-            */}
-
-          
-
-              {/* '감정(3버킷 타임라인)' 섹션 제거됨 */}
+                <div className="h-44 w-full">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart
+                      data={earData}
+                      onClick={(e) => e && typeof e.activeLabel === "number" && seekTo(e.activeLabel)}
+                      margin={{ top: 10, right: 12, bottom: 8, left: 0 }}
+                    >
+                      <CartesianGrid strokeDasharray="3 3" />
+                      <XAxis dataKey="t" tickFormatter={secToMMSS} interval={Math.floor(DURATION_SEC / 6)} />
+                      <YAxis domain={[0.05, 0.4]} />
+                      <RechartsTooltip
+                        content={({ active, payload, label }) => {
+                          if (!active || !payload?.length) return null;
+                          const val = payload[0]?.value;
+                          return (
+                            <div className="rounded-md bg-white/95 backdrop-blur border px-3 py-2 text-sm shadow">
+                              <div className="font-medium">{secToMMSS(label)} · 눈 깜빡임</div>
+                              <div className="text-gray-500">EAR {val}</div>
+                              <div className="text-xs text-gray-400">값이 낮을수록 눈이 감김</div>
+                            </div>
+                          );
+                        }}
+                      />
+                      <ReferenceArea y1={0.18} y2={0.32} fill={COLOR_ACCENT} fillOpacity={0.08} />
+                      <Line
+                        type="monotone"
+                        dataKey="ear"
+                        stroke={COLOR_SECONDARY}
+                        dot={false}
+                        strokeWidth={2}
+                      />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+              </div>
             </motion.div>
 
             <div className="mt-8 mb-3 flex items-center gap-3">
@@ -464,13 +594,27 @@ export default function Analysis_Video() {
 
             <div className="mt-6 grid grid-cols-1 gap-6 xl:grid-cols-3">
               {/* 고개 방향 */}
-              <InsightCard title="고개 방향" subtitle="정면 유지가 좋을수록 메시지 전달이 선명해요" status={poseStatus}>
+              <InsightCard title="고개 방향" subtitle="정면 유지가 좋을수록 메시지 전달이 선명해요" status={(() => {
+                const r = series.headPose?.ratios || poseRatio;
+                const front = r["정면"] ?? 0;
+                const up = r["상"] ?? 0;
+                const down = r["하"] ?? 0;
+                const max = Math.max(front, up, down);
+                if (max === up) return "상";
+                if (max === down) return "하";
+                return "정면";
+              })()}
+              >
                 <div className="flex flex-col min-h-[340px]">
                   <div className="flex-1 h-[220px] flex items-center justify-center">
                     <div className="w-[240px] h-[220px]">
                       <ResponsiveContainer width="100%" height="100%">
                         <PieChart>
-                          <Pie data={posePie} dataKey="value" nameKey="name" innerRadius={40} outerRadius={85} labelLine={false} label={posePieLabel}>
+                          <Pie data={[
+                            { name: "정면", value: Math.round((poseRatio["정면"] || 0) * 100) },
+                            { name: "상", value: Math.round((poseRatio["상"] || 0) * 100) },
+                            { name: "하", value: Math.round((poseRatio["하"] || 0) * 100) },
+                          ]} dataKey="value" nameKey="name" innerRadius={40} outerRadius={85} labelLine={false} label={posePieLabel}>
                             <Cell fill={STRIP_FRONT} />
                             <Cell fill={STRIP_UP} />
                             <Cell fill={STRIP_DOWN} />
@@ -479,19 +623,31 @@ export default function Analysis_Video() {
                       </ResponsiveContainer>
                     </div>
                   </div>
-                  <div className="mt-auto">
-                    <div className="rounded-lg border border-amber-200 bg-amber-50 p-2 text-amber-800 text-sm">
-                      고개가 아래로 숙인 구간이 감지됐어요 (약 {tiltDownPct}%). 질문을 들을 때도 시선을 정면에 두면 전달력이 좋아져요.
-                    </div>
-                  </div>
+
+                  {/* ✅ 최대 비율만 보고 단일 코멘트 */}
+                  {(() => {
+                    const r = series.headPose?.ratios || poseRatio;
+                    const front = r["정면"] ?? 0;
+                    const up = r["상"] ?? 0;
+                    const down = r["하"] ?? 0;
+                    const max = Math.max(front, up, down);
+                    const isPoseGood = (max === front);
+                    return (
+                      <FeedbackBoxEmph tone={isPoseGood ? "good" : "warn"}>
+                        {max === up
+                          ? <>고개를 드는 비율이 높아 개선이 필요합니다.</>
+                          : max === down
+                          ? <>고개를 숙이는 비율이 높아 개선이 필요합니다.</>
+                          : <>정면을 응시하는 비율이 높아 안정적입니다.</>}
+                      </FeedbackBoxEmph>
+                    );
+                  })()}
                 </div>
               </InsightCard>
 
-              {/* ✅ 눈 깜빡임: 파스텔톤 2박스(횟수/빈도), '영상 길이' 제거 */}
+              {/* 눈 깜빡임 */}
               <InsightCard title="눈 깜빡임" subtitle="깜빡임은 긴장 완화의 자연스러운 신호예요" status={blinkStatus}>
                 <div className="flex flex-col min-h-[340px]">
-                 
-                  {/* 파스텔 카드 2개 */}
                   <div className="grid grid-cols-2 gap-4 flex-1 items-center">
                     <div className="rounded-2xl bg-emerald-50 p-6 flex flex-col items-center justify-center shadow-sm">
                       <div className="text-sm text-emerald-700">깜빡임 횟수</div>
@@ -510,19 +666,19 @@ export default function Analysis_Video() {
                     </div>
                   </div>
 
-                  {/* 해석 */}
-                  {blinkSummary?.interpretation && (
-                    <div className="mt-6">
-                      <div className="rounded-lg border border-gray-100 bg-white p-3 text-sm text-gray-600 text-center shadow-sm">
-                        {blinkSummary.interpretation}
-                      </div>
-                    </div>
-                  )}
+                  <FeedbackBoxEmph tone={blinkStatus === "정상" ? "good" : "warn"}>
+                    {blinkSummary?.interpretation ||
+                      (blinksPerMinLocal >= 10 && blinksPerMinLocal <= 20
+                        ? "안정된 상태"
+                        : blinksPerMinLocal >= 21
+                        ? "약간의 긴장 상태"
+                        : "깜빡임 빈도가 낮습니다. 건조하지 않도록 주의하세요.")}
+                  </FeedbackBoxEmph>
                 </div>
               </InsightCard>
 
               {/* 표정/감정 (7감정) */}
-              <InsightCard title="표정/감정" subtitle="밝은 표정은 친화감을 높여요" status={series.most_common_emotion ? `${series.most_common_emotion} 우세` : "중립"}>
+              <InsightCard title="표정/감정" subtitle="밝은 표정은 친화감을 높여요" status={emotionBadge}>
                 <div className="flex flex-col min-h-[340px]">
                   <div className="flex-1 h-[220px] grid grid-cols-1 gap-4 sm:grid-cols-2 items-center">
                     <div className="h-full">
@@ -532,7 +688,7 @@ export default function Analysis_Video() {
                             data={EMOTION_ORDER.map((k) => ({
                               key: k,
                               name: EMO_LABEL[k],
-                              value: Math.round(((emotionDist7?.[k] ?? 0) * 100)),
+                              value: Math.round(((series.emotion_dist7?.[k] ?? 0) * 100)),
                             }))}
                             dataKey="value"
                             nameKey="name"
@@ -547,13 +703,14 @@ export default function Analysis_Video() {
                     </div>
                     <div className="text-sm space-y-1">
                       {EMOTION_ORDER.map((k) => (
-                        <RowKV key={k} k={EMO_LABEL[k]} v={`${Math.round(((emotionDist7?.[k] ?? 0) * 100))}%`} />
+                        <RowKV key={k} k={EMO_LABEL[k]} v={`${Math.round(((series.emotion_dist7?.[k] ?? 0) * 100))}%`} />
                       ))}
                     </div>
                   </div>
-                  <div className="mt-auto pt-4 rounded-lg bg-gray-50 p-2 text-sm text-gray-600">
-                    {series.emotion_warning || "표정 신호를 전체적으로 안정적으로 사용하고 있어요."}
-                  </div>
+
+                  <FeedbackBoxEmph tone={isEmotionGood ? "good" : "warn"}>
+                    {emotionMsg}
+                  </FeedbackBoxEmph>
                 </div>
               </InsightCard>
             </div>
@@ -598,23 +755,36 @@ function InsightCard({ title, subtitle, status, children }) {
           <h3 className="text-base font-semibold text-gray-900">{title}</h3>
           <p className="text-sm text-gray-600">{subtitle}</p>
         </div>
-       <span
-        className={`rounded-full bg-gray-100 px-3 py-1 text-xs font-medium ${
-          status === "정상"
-           ? "text-emerald-600"
-           : status === "주의"
-           ? "text-amber-600"
-           : status === "경고"
-           ? "text-rose-600"
-           : "text-gray-700"
-        }`}
+        <span
+          className={`rounded-full bg-gray-100 px-3 py-1 text-xs font-medium ${
+            status === "정상"
+              ? "text-emerald-600"
+              : status === "주의"
+              ? "text-amber-600"
+              : status === "경고"
+              ? "text-rose-600"
+              : "text-gray-700"
+          }`}
         >
-  {status}
-</span>
-
+          {status}
+        </span>
       </div>
       {children}
     </motion.div>
+  );
+}
+
+function FeedbackBoxEmph({ children, tone = "warn" }) {
+  const cls =
+    tone === "good"
+      ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+      : "border-amber-200 bg-amber-50 text-amber-800";
+  return (
+    <div className="mt-auto">
+      <div className={`rounded-lg border p-3 text-sm text-center shadow-sm ${cls}`}>
+        {children}
+      </div>
+    </div>
   );
 }
 
