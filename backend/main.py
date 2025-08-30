@@ -494,7 +494,7 @@ def _fallback_speech_result(audio_path: Path, script_path: Optional[Path]) -> Sp
     )
 
 def _map_speech_raw_to_response(raw: Dict[str, Any]) -> SpeechAnalysisResponse:
-    # 1) 기본 지표 파싱
+    # 기본 지표
     pron_acc_pct = float(raw.get("발음 유사도 점수", raw.get("pronunciation_accuracy", 0.0)))
     pron_acc = pron_acc_pct / (100.0 if pron_acc_pct > 1.0 else 1.0)
 
@@ -507,7 +507,7 @@ def _map_speech_raw_to_response(raw: Dict[str, Any]) -> SpeechAnalysisResponse:
     mfcc_mean = list(raw.get("MFCC 평균", raw.get("mfcc_mean", [])))[:13]
     mfcc_std  = list(raw.get("MFCC 표준편차", raw.get("mfcc_std", [])))[:13]
 
-    # 2) STT HTML 경로 보정
+    # STT HTML 경로 보정
     stt_url = raw.get("stt_result_url") or raw.get("stt_results_url")
     if stt_url:
         name = Path(str(stt_url)).name
@@ -516,7 +516,7 @@ def _map_speech_raw_to_response(raw: Dict[str, Any]) -> SpeechAnalysisResponse:
         candidate = SPEECH_RESULT_ROOT / "stt_results.html"
         stt_url = f"/model/speech/results/{candidate.name}" if candidate.exists() else None
 
-    # 3) 세그먼트 정규화 + 전역 이벤트 수집
+    # 세그먼트 정규화 + 전역 이벤트 수집
     segments_norm: List[Segment] = []
     global_fillers: List[Dict[str, Any]] = []   # [{token, time}]
     global_silence: List[Dict[str, float]] = [] # [{start,end}]
@@ -532,7 +532,7 @@ def _map_speech_raw_to_response(raw: Dict[str, Any]) -> SpeechAnalysisResponse:
                 s = float(seg.get("start_sec", 0.0))
                 e = float(seg.get("end_sec", 0.0))
 
-            # 세그먼트 내 filler -> 전역 타임라인으로 수집 (시간 중심점)
+            # fillers -> 전역 타임라인(중심 시각)
             for f in seg.get("fillers", []) or []:
                 try:
                     token, fs, fe = f[0], float(f[1]), float(f[2])
@@ -540,7 +540,7 @@ def _map_speech_raw_to_response(raw: Dict[str, Any]) -> SpeechAnalysisResponse:
                 except Exception:
                     pass
 
-            # 세그먼트 내 무음 -> 절대시간으로 변환하여 수집
+            # silence -> 절대시간
             for iv in seg.get("silence", []) or []:
                 try:
                     ls, le = float(iv[0]), float(iv[1])
@@ -560,8 +560,7 @@ def _map_speech_raw_to_response(raw: Dict[str, Any]) -> SpeechAnalysisResponse:
         else:
             segments_norm.append(Segment(start_sec=0.0, end_sec=5.0))
 
-    # 4) 간투사 발생/유형 구성
-    # 4-1) speech_analysis가 직접 occurrences를 넣어줬다면 우선 사용
+    # 간투사 occurrences/by_type 구성
     raw_fw = (
         raw.get("Filler Words")
         or raw.get("Filler_Words")
@@ -570,87 +569,74 @@ def _map_speech_raw_to_response(raw: Dict[str, Any]) -> SpeechAnalysisResponse:
         or []
     )
 
-    occurrences: List[Dict[str, Any]] = []  # [{type, start, end, time, duration}]
+    occurrences: List[Dict[str, Any]] = []  # [{type,start,end,time,duration}]
     by_type: Dict[str, int] = {}
 
+    # 1순위: 영문 키로 온 occurrences
     if raw_fw:
         for it in raw_fw:
             try:
                 t, s2, e2 = it[0], float(it[1]), float(it[2])
             except Exception:
-                # dict 형태일 수 있음
                 t = (it.get("type") or it.get("token") or it.get("word"))
                 s2 = float(it.get("start", it.get("start_sec", 0.0)))
                 e2 = float(it.get("end", it.get("end_sec", 0.0)))
             if not t:
                 continue
             occurrences.append({
-                "type": str(t),
-                "start": s2,
-                "end": e2,
-                "time": (s2 + e2) / 2.0,
-                "duration": max(0.0, e2 - s2)
+                "type": str(t), "start": s2, "end": e2,
+                "time": (s2 + e2) / 2.0, "duration": max(0.0, e2 - s2)
             })
         for o in occurrences:
             by_type[o["type"]] = by_type.get(o["type"], 0) + 1
 
-    # 4-2) 전역 요약 키(간투사 종류/빈도)가 있으면 반영 (raw_fw가 없거나 부족할 때)
-    filler_types_from_raw = list(raw.get("간투사 종류", []))  # ["어", "음", ...]
-    filler_by_type_from_raw = dict(raw.get("간투사_빈도", {}))  # {"어":3, "음":2}
-
+    # 2순위: 한국어 요약 키 (speech_analysis에서 넣어줌)
+    filler_types_from_raw = list(raw.get("간투사 종류", []))          # ["어","음",...]
+    filler_by_type_from_raw = dict(raw.get("간투사_빈도", {}))        # {"어":3,"음":2}
     if not by_type and filler_by_type_from_raw:
         by_type = {str(k): int(v) for k, v in filler_by_type_from_raw.items()}
 
-    # 4-3) occurrences가 비었으면 세그먼트 기반 전역 타임라인으로 보강
+    # 3순위: 세그먼트 기반 보강
     if not occurrences and global_fillers:
         for f in global_fillers:
             tkn = str(f.get("token", "F"))
             tm = float(f.get("time", 0.0))
             occurrences.append({
-                "type": tkn,
-                "start": max(0.0, tm - 0.05),
-                "end": tm + 0.05,
-                "time": tm,
-                "duration": 0.1
+                "type": tkn, "start": max(0.0, tm - 0.05), "end": tm + 0.05,
+                "time": tm, "duration": 0.1
             })
         if not by_type:
             for o in occurrences:
                 by_type[o["type"]] = by_type.get(o["type"], 0) + 1
 
-    # 4-4) 총합
+    # 총합
     filler_total = raw.get("간투사 수", raw.get("filler_count", raw.get("Filler Count")))
     if isinstance(filler_total, (int, float)):
         filler_total = int(filler_total)
     else:
-        # 명시 총합이 없으면 occurrences 우선, 그 다음 by_type 총합
         filler_total = len(occurrences) if occurrences else sum(by_type.values())
 
-    # 5) 세그먼트(프론트 표준) JSON도 생성/저장
+    # 세그먼트 파일도 저장(프론트에서 /api/speech/segments로 조회할 때 사용)
     segments_json = _build_segments_results_from_totaltemp(
         raw=raw,
         segments_norm=segments_norm,
         global_fillers=[{"token": o.get("type"), "time": o.get("time", o.get("start", 0.0))} for o in occurrences],
         global_silence=global_silence,
-        pron_acc=pron_acc,
-        wpm=wpm,
-        pause_ratio=pause_ratio,
+        pron_acc=pron_acc, wpm=wpm, pause_ratio=pause_ratio,
     )
     _save_speech_json("segments_results.json", segments_json)
 
-    # 6) 한 줄 요약 (콘솔 메시지와 동일한 규칙)
+    # 한 줄 요약/점수
     feedback_text = _make_feedback_text(pron_acc, pitch_mean, wpm, filler_total)
-
-    # 7) 임시 점수(데모)
     scores = {
         "pronunciation": round(pron_acc * 10, 2),
-        "speed": 7.0,
-        "intonation": 6.0,
+        "speed": 7.0, "intonation": 6.0,
         "filler": max(0.0, 10.0 - min(10.0, float(filler_total))),
         "pause": max(0.0, 10.0 - round(pause_ratio * 10, 2)),
         "mfcc": 8.0,
     }
 
-    # 8) 최종 응답
+    # 최종 응답
     return SpeechAnalysisResponse(
         pronunciation_accuracy=pron_acc,
         wpm=wpm,
