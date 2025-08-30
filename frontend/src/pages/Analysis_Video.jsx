@@ -60,11 +60,11 @@ const EMO_KO = {
 };
 const DEFAULT_STABLE_MSG = "적절하고 안정감있는 표정을 잘 유지하고 있습니다.";
 const WARNING_MESSAGES = {
-  angry: "화난 표정 비중이 높아요. 보다 평온하고 중립적인 표정 연습을 권합니다.",
-  disgust: "불쾌한 표정 비중이 높아요. 보다 평온하고 중립적인 표정 연습을 권합니다.",
-  scared: "두려운 표정 비중이 높아요. 보다 평온하고 중립적인 표정 연습을 권합니다.",
-  sad: "슬픈 표정 비중이 높아요. 보다 평온하고 중립적인 표정 연습을 권합니다.",
-  surprised: "놀란 표정 비중이 높아요. 보다 평온하고 중립적인 표정 연습을 권합니다.",
+  angry: "화난 표정 비중이 높아요.\n보다 평온하고 중립적인 표정 연습을 권합니다.",
+  disgust: "불쾌한 표정 비중이 높아요.\n보다 평온하고 중립적인 표정 연습을 권합니다.",
+  scared: "두려운 표정 비중이 높아요.\n보다 평온하고 중립적인 표정 연습을 권합니다.",
+  sad: "슬픈 표정 비중이 높아요.\n보다 평온하고 중립적인 표정 연습을 권합니다.",
+  surprised: "놀란 표정 비중이 높아요.\n보다 평온하고 중립적인 표정 연습을 권합니다.",
 };
 function pickMostCommonEmotion(dist) {
   if (!dist) return null;
@@ -178,11 +178,14 @@ function gradeStyle(grade) {
   }
 }
 
-/* ====== HeadPose 정규화 (추가) ====== */
-// - data.head_pose: { ratios, counts, records }
-// - data.head_pose_summary: { ...ratios... }
-// - data.head_pose_records: [ {time_sec, head_pose, pitch_deg}, ... ]
-// - 또는 일반 필드(ratios/records/counts)만 존재해도 처리
+/* ====== HeadPose 정규화 (ratio 응답 연동) ====== */
+// 백엔드 예시:
+//   total = sum(head_pose_counts.values())
+//   ratios = {
+//     "looking down ratio": round(down/total, 3),
+//     "looking front ratio": round(front/total, 3),
+//     "looking up ratio": round(up/total, 3)
+//   }
 function normalizeHeadPose(data) {
   if (!data || typeof data !== "object") return null;
 
@@ -192,18 +195,13 @@ function normalizeHeadPose(data) {
     (hp && hp.ratios) ||
     data.head_pose_summary ||
     data.ratios ||
+    hp ||
     null;
 
   const recs =
     (hp && hp.records) ||
     data.head_pose_records ||
     data.records ||
-    null;
-
-  const counts =
-    (hp && hp.counts) ||
-    data.head_pose_counts ||
-    data.counts ||
     null;
 
   // 영문 → 국문 키 변환
@@ -245,11 +243,7 @@ function normalizeHeadPose(data) {
     labels = arr;
   }
 
-  return {
-    ratios: korRatios, // {하, 정면, 상} | null
-    labels,            // ["정면","상","정면",...] | null
-    counts,            // 선택 사용
-  };
+  return { ratios: korRatios, labels };
 }
 
 /* ===================== Main ===================== */
@@ -265,11 +259,10 @@ export default function Analysis_Video() {
   const [notice, setNotice] = useState("");
 
   const DEMO_LEN = 118;
-  // ✅ headPose 초기값 추가
   const [series, setSeries] = useState(() => ({ ...genDummySeries(DEMO_LEN), headPose: null }));
   const DURATION_SEC = series?.ear?.length || DEMO_LEN;
 
-  // 👇 깜빡임 요약(팀원 JSON) 상태
+  // 깜빡임 요약(팀원 JSON)
   const [blinkSummary, setBlinkSummary] = useState(null);
 
   useEffect(() => {
@@ -287,7 +280,7 @@ export default function Analysis_Video() {
     [blinkEvents.length, DURATION_SEC]
   );
 
-  // ✅ headPose 우선 사용
+  // 머리방향 라벨 생성(백엔드 labels 우선, 없으면 비율의 최빈으로 채우기, 둘 다 없으면 pitch 유추)
   const poseLabels = useMemo(() => {
     if (series.headPose?.labels?.length) return series.headPose.labels;
     if (series.headPose?.ratios && (series.pitch?.length || 0) > 0) {
@@ -310,7 +303,7 @@ export default function Analysis_Video() {
   }, [poseLabels]);
 
   const poseRatio = useMemo(() => {
-    if (series.headPose?.ratios) return series.headPose.ratios;
+    if (series.headPose?.ratios) return series.headPose.ratios; // ✅ 백엔드 ratio 응답 사용
     return ratio(poseCounts);
   }, [series.headPose, poseCounts]);
 
@@ -325,7 +318,6 @@ export default function Analysis_Video() {
     { name: "하", value: Math.round((poseRatio["하"] || 0) * 100) },
   ];
 
-  // 상태 배지 텍스트(깜빡임은 팀원 등급을 우선 표시)
   const poseStatus = (poseRatio["정면"] || 0) >= 0.6 ? "좋음" : (poseRatio["정면"] || 0) >= 0.45 ? "보통" : "주의";
   const blinkStatus = blinkSummary?.grade || ((blinksPerMinLocal >= 10 && blinksPerMinLocal <= 20) ? "정상" : blinksPerMinLocal < 10 ? "낮음" : "주의");
 
@@ -389,7 +381,6 @@ export default function Analysis_Video() {
         EMOTION_ORDER.forEach(k => emotion_dist7[k] = (counts[k]||0)/total);
       }
 
-      // 경고/요약(서버 제공값은 무시 가능하지만, fallback으로 저장)
       const emotion_warning = data?.warning || "";
       const most_common_emotion = data?.most_common_emotion || null;
       const negative_ratio = (typeof data?.negative_emotion_ratio === "number")
@@ -398,7 +389,7 @@ export default function Analysis_Video() {
            ? (emotion_dist7.angry||0)+(emotion_dist7.disgust||0)+(emotion_dist7.scared||0)+(emotion_dist7.sad||0)+(emotion_dist7.surprised||0)
            : 0);
 
-      // 👇 팀원 JSON 깜빡임 요약 찾기
+      // 팀원 JSON 깜빡임 요약
       const rawBlink =
         data?.blink_summary ??
         data?.summary?.blink ??
@@ -407,7 +398,7 @@ export default function Analysis_Video() {
       if (rawBlink) {
         setBlinkSummary(normalizeBlinkSummary(rawBlink));
       } else {
-        // 서버에 요약이 없으면, 로컬 계산값으로 최소한의 더미 구성
+        // 서버에 요약이 없으면 로컬 계산값으로 더미 구성
         const localCount = detectBlinks(ear || []).length;
         const localFreq = Math.round(((localCount || 0) / Math.max(1, (ear?.length || 1) / 60)) * 10) / 10;
         setBlinkSummary(normalizeBlinkSummary({
@@ -418,14 +409,13 @@ export default function Analysis_Video() {
         }));
       }
 
-      // ✅ 고개 각도(head pose) 파싱 (추가)
+      // ✅ 고개 각도(head pose) — ratio 응답 연동
       const headPose = normalizeHeadPose({
-        head_pose: data?.head_pose,
+        head_pose: data?.head_pose,             // { "looking front ratio": 0.62, ... } 가능
         head_pose_summary: data?.head_pose_summary,
         head_pose_records: data?.head_pose_records,
         ratios: data?.ratios,
         records: data?.records,
-        counts: data?.counts,
       });
 
       if (!ear.length && !pitch.length && !emotion_dist7 && !headPose) {
@@ -439,7 +429,7 @@ export default function Analysis_Video() {
         emotion_warning,
         most_common_emotion,
         negative_ratio,
-        headPose, // ✅ 추가
+        headPose, // ✅ 저장
       });
 
       setProgress(100);
@@ -474,7 +464,7 @@ export default function Analysis_Video() {
     }
   };
 
-  // ✅ 프론트 계산 감정 배지/문구(+ good 여부)
+  // 감정 배지/문구
   const { badge: emotionBadge, msg: emotionMsg, isGood: isEmotionGood } = computeEmotionFeedback(
     series.emotion_dist7,
     series.most_common_emotion
@@ -594,27 +584,34 @@ export default function Analysis_Video() {
 
             <div className="mt-6 grid grid-cols-1 gap-6 xl:grid-cols-3">
               {/* 고개 방향 */}
-              <InsightCard title="고개 방향" subtitle="정면 유지가 좋을수록 메시지 전달이 선명해요" status={(() => {
-                const r = series.headPose?.ratios || poseRatio;
-                const front = r["정면"] ?? 0;
-                const up = r["상"] ?? 0;
-                const down = r["하"] ?? 0;
-                const max = Math.max(front, up, down);
-                if (max === up) return "상";
-                if (max === down) return "하";
-                return "정면";
-              })()}
+              <InsightCard
+                title="고개 방향"
+                subtitle="정면 유지가 좋을수록 메시지 전달이 선명해요"
+                status={(() => {
+                  const r = series.headPose?.ratios || poseRatio;
+                  const front = r["정면"] ?? 0;
+                  const up = r["상"] ?? 0;
+                  const down = r["하"] ?? 0;
+                  const max = Math.max(front, up, down);
+                  if (max === up) return "상";
+                  if (max === down) return "하";
+                  return "정면";
+                })()}
               >
                 <div className="flex flex-col min-h-[340px]">
                   <div className="flex-1 h-[220px] flex items-center justify-center">
                     <div className="w-[240px] h-[220px]">
                       <ResponsiveContainer width="100%" height="100%">
                         <PieChart>
-                          <Pie data={[
-                            { name: "정면", value: Math.round((poseRatio["정면"] || 0) * 100) },
-                            { name: "상", value: Math.round((poseRatio["상"] || 0) * 100) },
-                            { name: "하", value: Math.round((poseRatio["하"] || 0) * 100) },
-                          ]} dataKey="value" nameKey="name" innerRadius={40} outerRadius={85} labelLine={false} label={posePieLabel}>
+                          <Pie
+                            data={posePie}
+                            dataKey="value"
+                            nameKey="name"
+                            innerRadius={40}
+                            outerRadius={85}
+                            labelLine={false}
+                            label={posePieLabel}
+                          >
                             <Cell fill={STRIP_FRONT} />
                             <Cell fill={STRIP_UP} />
                             <Cell fill={STRIP_DOWN} />
@@ -624,22 +621,21 @@ export default function Analysis_Video() {
                     </div>
                   </div>
 
-                  {/* ✅ 최대 비율만 보고 단일 코멘트 */}
+                  {/* ✅ 최대 비율만 보고 단일 코멘트 (흰색 통일 박스) */}
                   {(() => {
                     const r = series.headPose?.ratios || poseRatio;
                     const front = r["정면"] ?? 0;
                     const up = r["상"] ?? 0;
                     const down = r["하"] ?? 0;
                     const max = Math.max(front, up, down);
-                    const isPoseGood = (max === front);
                     return (
-                      <FeedbackBoxEmph tone={isPoseGood ? "good" : "warn"}>
+                      <FeedbackNote>
                         {max === up
                           ? <>고개를 드는 비율이 높아 개선이 필요합니다.</>
                           : max === down
                           ? <>고개를 숙이는 비율이 높아 개선이 필요합니다.</>
                           : <>정면을 응시하는 비율이 높아 안정적입니다.</>}
-                      </FeedbackBoxEmph>
+                      </FeedbackNote>
                     );
                   })()}
                 </div>
@@ -666,14 +662,15 @@ export default function Analysis_Video() {
                     </div>
                   </div>
 
-                  <FeedbackBoxEmph tone={blinkStatus === "정상" ? "good" : "warn"}>
+                  {/* ✅ 흰색 통일 피드백 박스 */}
+                  <FeedbackNote>
                     {blinkSummary?.interpretation ||
                       (blinksPerMinLocal >= 10 && blinksPerMinLocal <= 20
                         ? "안정된 상태"
                         : blinksPerMinLocal >= 21
                         ? "약간의 긴장 상태"
                         : "깜빡임 빈도가 낮습니다. 건조하지 않도록 주의하세요.")}
-                  </FeedbackBoxEmph>
+                  </FeedbackNote>
                 </div>
               </InsightCard>
 
@@ -708,9 +705,8 @@ export default function Analysis_Video() {
                     </div>
                   </div>
 
-                  <FeedbackBoxEmph tone={isEmotionGood ? "good" : "warn"}>
-                    {emotionMsg}
-                  </FeedbackBoxEmph>
+                  {/* ✅ 흰색 통일 피드백 박스 */}
+                  <FeedbackNote>{emotionMsg}</FeedbackNote>
                 </div>
               </InsightCard>
             </div>
@@ -774,19 +770,17 @@ function InsightCard({ title, subtitle, status, children }) {
   );
 }
 
-function FeedbackBoxEmph({ children, tone = "warn" }) {
-  const cls =
-    tone === "good"
-      ? "border-emerald-200 bg-emerald-50 text-emerald-800"
-      : "border-amber-200 bg-amber-50 text-amber-800";
+/* ✅ 흰색(통일) 피드백 박스: 하단 문구 전용 */
+function FeedbackNote({ children, className = "" }) {
   return (
-    <div className="mt-auto">
-      <div className={`rounded-lg border p-3 text-sm text-center shadow-sm ${cls}`}>
-        {children}
-      </div>
+    <div
+      className={`mt-auto rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-800 text-center shadow-sm whitespace-pre-line ${className}`}
+    >
+      {children}
     </div>
   );
 }
+
 
 function StripRow({ label, data, colorOf, onClickIndex, tooltipOf, className = "" }) {
   return (
