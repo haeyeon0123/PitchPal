@@ -394,7 +394,11 @@ def _build_segments_results_from_totaltemp(
     wpm: float,
     pause_ratio: float
 ) -> dict:
-    # 1) occurrences 확보
+    # 한국어 요약 키 우선
+    by_type_pref = raw.get("간투사_빈도", {})
+    types_pref = raw.get("간투사 종류", [])
+
+    # 1) occurrences 확보 (영문 키 우선)
     occ_src = raw.get("Filler Words") or raw.get("Filler_Words") \
               or raw.get("filler_occurrences") or raw.get("Filler Occurrences") \
               or []
@@ -407,20 +411,22 @@ def _build_segments_results_from_totaltemp(
             pass
     if not occurrences and global_fillers:
         for f in global_fillers:
-            t = float(f.get("time", f.get("time_sec", 0.0)))
-            w = str(f.get("token", f.get("word", "F")))
-            occurrences.append({"type": w, "start": max(0.0, t - 0.05), "end": t + 0.05, "time": t})
+            t = str(f.get("token", f.get("word", "F")))
+            tm = float(f.get("time", f.get("time_sec", 0.0)))
+            occurrences.append({"type": t, "start": max(0.0, tm - 0.05), "end": tm + 0.05, "time": tm})
 
-    # 2) 유형별 집계
-    by_type: Dict[str, int] = {}
-    for o in occurrences:
-        w = o.get("type", "기타")
-        by_type[w] = by_type.get(w, 0) + 1
+    # 2) by_type
+    if by_type_pref:
+        by_type = {str(k): int(v) for k, v in by_type_pref.items()}
+    else:
+        by_type = {}
+        for o in occurrences:
+            w = o.get("type", "기타")
+            by_type[w] = by_type.get(w, 0) + 1
 
-    # 3) 총합(백엔드 원본이 있으면 우선, 없으면 occurrences 길이)
-    filler_total = int(raw.get("간투사 수", raw.get("Filler Count", raw.get("filler_count", len(occurrences)))))
+    # 3) 총합
+    filler_total = int(raw.get("간투사 수", raw.get("Filler Count", raw.get("filler_count", sum(by_type.values())))))
 
-    # 4) 세그먼트 요약
     segs = [{
         "time_range": f"{s.start_sec:.2f}-{s.end_sec:.2f}",
         "wpm": s.wpm,
@@ -441,6 +447,7 @@ def _build_segments_results_from_totaltemp(
             "total": filler_total,
             "by_type": by_type,
             "occurrences": occurrences,
+            # 필요하면 "types": types_pref or sorted(by_type.keys())
         },
         "segments": segs,
         "silence": global_silence,
