@@ -191,7 +191,6 @@ def analyze_speech(audio_path: str, script_path: str, model=None, segment_durati
 
     # >>> 추가: 종류/빈도 요약
     by_type_counter = Counter([w for (w, _s, _e) in (filler_occurrences or [])])
-    filler_types = sorted(by_type_counter.keys())
     filler_by_type = {k: int(v) for k, v in by_type_counter.items()}
 
     # 8) 간투사를 세그먼트별로 버킷팅
@@ -277,7 +276,7 @@ def analyze_speech(audio_path: str, script_path: str, model=None, segment_durati
         "무음 구간 비율": pause_ratio,
         "간투사 수": int(filler_count),
         # >>> 추가된 전역 요약
-        "간투사 종류": filler_types,         # 예: ["어","음","그"]
+        "간투사 종류": filler_occurrences,         # 예: ["어","음","그"]
         "간투사_빈도": filler_by_type,       # 예: {"어":3,"음":2,"그":1}
         "stt_result_url": stt_result_url,     # NEW
     }
