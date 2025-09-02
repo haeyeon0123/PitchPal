@@ -1,6 +1,6 @@
-from core.stt_pronunciation import transcribe_audio, load_whisper_model
-from core.filler_words import detect_filler_words
-from core.speech_analysis import analyze_speech, save_segment_features_to_json
+from model.speech.core.stt_pronunciation import transcribe_audio, load_whisper_model
+from model.speech.core.filler_words import detect_filler_words
+from model.speech.core.speech_analysis import analyze_speech, save_segment_features_to_json
 import time
 
 if __name__ == "__main__":
