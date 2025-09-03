@@ -136,13 +136,15 @@ async def _startup_env_log():
     )
 
 # -----------------------------------------------------
-# 디렉토리 구성
+# 디렉토리 구성 (프로젝트 루트 기준)
 # -----------------------------------------------------
-CONTENT_RESULT_ROOT = Path("model") / "content" / "results"
-CONTENT_RESULT_ROOT.mkdir(parents=True, exist_ok=True)
+ROOT_DIR = Path(__file__).resolve().parents[1]   # PitchPal/
 
-SPEECH_TMP_ROOT    = Path("model") / "speech" / "tmp"
-SPEECH_RESULT_ROOT = Path("model") / "speech" / "results"
+CONTENT_RESULT_ROOT = ROOT_DIR / "model" / "content" / "results"
+SPEECH_TMP_ROOT     = ROOT_DIR / "model" / "speech" / "tmp"
+SPEECH_RESULT_ROOT  = ROOT_DIR / "model" / "speech" / "results"
+
+CONTENT_RESULT_ROOT.mkdir(parents=True, exist_ok=True)
 SPEECH_TMP_ROOT.mkdir(parents=True, exist_ok=True)
 SPEECH_RESULT_ROOT.mkdir(parents=True, exist_ok=True)
 
@@ -492,14 +494,22 @@ def _map_speech_raw_to_response(raw: Dict[str, Any], session_id: str) -> SpeechA
     mfcc_mean = _to_float_list(raw.get("MFCC 평균", raw.get("mfcc_mean")), 13)
     mfcc_std  = _to_float_list(raw.get("MFCC 표준편차", raw.get("mfcc_std")), 13)
 
-    # STT HTML 경로 보정 → 세션 스코프
-    stt_url = raw.get("stt_result_url") or raw.get("stt_results_url")
-    if stt_url:
-        name = Path(str(stt_url)).name
-        stt_url = f"/model/speech/results/{session_id}/{name}"
-    else:
-        candidate = SPEECH_RESULT_ROOT / session_id / "stt_results.html"
-        stt_url = f"/model/speech/results/{session_id}/{candidate.name}" if candidate.exists() else None
+    # --- STT HTML 세션 경로 보장 ---
+    src_html = SPEECH_RESULT_ROOT / "stt_results.html"   # 루트에 생성된 파일
+    dest_dir = SPEECH_RESULT_ROOT / session_id
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest_html = dest_dir / "stt_results.html"
+
+    # 루트에 있으면 세션 경로로 복사
+    if src_html.exists():
+        try:
+            shutil.copyfile(src_html, dest_html)
+        except Exception as e:
+            log_json("stt_copy_error", error=str(e))
+
+    # 프론트에는 항상 세션 경로 반환
+    stt_url = f"/model/speech/results/{session_id}/stt_results.html"
+
 
     segments_norm: List[Segment] = []
     global_fillers: List[Dict[str, Any]] = []
