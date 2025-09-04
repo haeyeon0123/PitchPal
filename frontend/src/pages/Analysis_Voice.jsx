@@ -1,6 +1,7 @@
 // 음성 분석 페이지
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';  // ★ 추가
 import {
   Radar, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis,
   ResponsiveContainer,
@@ -648,6 +649,8 @@ export default function AnalysisVoice() {
 
 /* ======================= 결과 섹션 ======================= */
 function ResultSection({ result, audioUrl, audioRef, onReplay, onReload, radarData }) {
+  const navigate = useNavigate(); // ★ 추가
+  
   // 총점(0~10)
   const totalScore10 = Number(
     ((Object.values(result.scores).reduce((a, b) => a + b, 0) / 6) * 2).toFixed(1)
@@ -674,6 +677,12 @@ const sttPath =
 const sttUrl = sttPath.startsWith('http')
   ? sttPath
   : `${API_BASE}${sttPath.startsWith('/') ? '' : '/'}${sttPath}`;
+
+  // ★ 추가: 프론트 뷰어로 열어서 따옴표/대괄호/쉼표 제거 버전 표시
+  const openSttViewer = () => {
+    if (!sttUrl) return;
+    navigate(`/stt-viewer?url=${encodeURIComponent(sttUrl)}`);
+  };
 
 
   return (
@@ -776,10 +785,15 @@ const sttUrl = sttPath.startsWith('http')
           음성 재생
         </button>
 
-        <a href={sttUrl} target="_blank" rel="noopener noreferrer" className="w-full sm:w-auto flex items-center justify-center gap-2 px-6 py-3 text-white font-semibold rounded-lg transition" style={{ backgroundColor: COLOR_PRIMARY }}>
+        <button
+          onClick={openSttViewer}
+          className="w-full sm:w-auto flex items-center justify-center gap-2 px-6 py-3 text-white font-semibold rounded-lg transition"
+          style={{ backgroundColor: COLOR_PRIMARY }}
+          title="발음 분석 결과 (따옴표 제거 버전)"
+        >
           <ExternalLink className="w-4 h-4 text-white" />
           <span>발음 분석 결과</span>
-        </a>
+        </button>
 
         <button onClick={onReload} className="w-full sm:w-auto px-6 py-3 border font-normal rounded-lg hover:bg-gray-100 transition" style={{ borderColor: '#e5e7eb' }}>
           다시 분석하기

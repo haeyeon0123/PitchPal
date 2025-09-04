@@ -74,6 +74,7 @@ app = FastAPI(title="PitchPal API")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[FRONT_ORIGIN],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )

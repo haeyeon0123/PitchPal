@@ -7,6 +7,7 @@ import ServiceIntro from './ServiceIntro';
 import AnalysisContent from './Analysis_Content';
 import AnalysisVoice from './Analysis_Voice';
 import AnalysisVideo from './Analysis_Video';
+import SttResultsViewer from './SttResultsViewer'; // ★ 추가: STT 결과 뷰어
 
 export default function App() {
   const { pathname } = useLocation();
@@ -153,6 +154,7 @@ export default function App() {
         <Route path="/content-analysis" element={<AnalysisContent />} />
         <Route path="/voice-analysis" element={<AnalysisVoice />} />
         <Route path="/video-analysis" element={<AnalysisVideo />} />
+        <Route path="/stt-viewer" element={<SttResultsViewer />} /> {/* ★ 추가 */}
       </Routes>
     </div>
   );
