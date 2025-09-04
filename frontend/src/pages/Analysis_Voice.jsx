@@ -1,7 +1,7 @@
 // 음성 분석 페이지
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { useNavigate } from 'react-router-dom';  // ★ 추가
+import { useSearchParams, useNavigate } from 'react-router-dom';
 import {
   Radar, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis,
   ResponsiveContainer,
@@ -12,7 +12,7 @@ import {
 } from 'recharts';
 import {
   CheckCircle, PauseCircle, Slash, Volume2, Activity, Mic, AudioLines, ExternalLink,
-  Lightbulb
+  Lightbulb, ChevronDown
 } from 'lucide-react';
 
 import { runSpeechAnalysis } from '../services/speechService';
@@ -424,6 +424,7 @@ export default function AnalysisVoice() {
   const audioInputRef = useRef(null);
   const scriptInputRef = useRef(null);
   const audioRef = useRef(null);
+  const [searchParams] = useSearchParams();  // ★ 추가
 
   const statusToText = (s) => {
     switch ((s || '').toLowerCase()) {
@@ -435,6 +436,16 @@ export default function AnalysisVoice() {
       default: return s || '진행 중…';
     }
   };
+
+  // ★ 추가: ?stt 파라미터가 사라질 때(=뒤로가기 등) 결과 섹션(#analysis)로 스크롤
+  useEffect(() => {
+    if (!result) return;
+    const hasStt = searchParams.get('stt') === '1';
+    if (!hasStt) {
+      const el = document.getElementById('analysis') || document.body;
+      el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }, [searchParams, result]);
 
   const handleAnalyze = useCallback(async () => {
     if (!fileInfo.audio || !fileInfo.script) {
@@ -643,6 +654,8 @@ export default function AnalysisVoice() {
           radarData={radarData}
         />
       )}
+     {/* URL에 ?stt=1 이 있으면 같은 페이지에 결과 HTML 표시 */}
+     {result && <SttInlineViewer />}
     </div>
   );
 }
@@ -678,12 +691,18 @@ const sttUrl = sttPath.startsWith('http')
   ? sttPath
   : `${API_BASE}${sttPath.startsWith('/') ? '' : '/'}${sttPath}`;
 
-  // ★ 추가: 프론트 뷰어로 열어서 따옴표/대괄호/쉼표 제거 버전 표시
+  // ★ 수정: 같은 페이지에서 뷰어 토글 (쿼리 파라미터 push)
   const openSttViewer = () => {
     if (!sttUrl) return;
-    navigate(`/stt-viewer?url=${encodeURIComponent(sttUrl)}`);
+    const next = new URLSearchParams(window.location.search);
+    next.set('stt', '1');
+    next.set('url', sttUrl);
+    navigate({ search: `?${next.toString()}` }, { replace: false });
+    // 뷰어 위치로 스크롤
+    setTimeout(() => {
+      document.getElementById('stt-viewer')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 0);
   };
-
 
   return (
     <div className="space-y-10">
@@ -787,12 +806,11 @@ const sttUrl = sttPath.startsWith('http')
 
         <button
           onClick={openSttViewer}
-          className="w-full sm:w-auto flex items-center justify-center gap-2 px-6 py-3 text-white font-semibold rounded-lg transition"
+          className="w-full sm:w-auto px-6 py-3 text-white font-semibold rounded-lg transition"
           style={{ backgroundColor: COLOR_PRIMARY }}
-          title="발음 분석 결과 (따옴표 제거 버전)"
+          title="발음 분석 결과"
         >
-          <ExternalLink className="w-4 h-4 text-white" />
-          <span>발음 분석 결과</span>
+          발음 분석 결과
         </button>
 
         <button onClick={onReload} className="w-full sm:w-auto px-6 py-3 border font-normal rounded-lg hover:bg-gray-100 transition" style={{ borderColor: '#e5e7eb' }}>
@@ -1249,3 +1267,73 @@ function ElevCard({ className = "", children }) {
     </div>
   );
 }
+
+// ★★★ 같은 페이지에 결과 HTML을 띄우는 가벼운 인라인 뷰어
+function SttInlineViewer() {
+  const [searchParams] = useSearchParams();
+  const stt = searchParams.get('stt');
+  const urlParam = searchParams.get('url') || "";
+  const [html, setHtml] = useState("");
+  const [error, setError] = useState("");
+
+  let fetchPath = urlParam;
+  if (fetchPath.startsWith("http://localhost:8000")) {
+    fetchPath = fetchPath.replace("http://localhost:8000", "");
+  } else if (fetchPath.startsWith("https://localhost:8000")) {
+    fetchPath = fetchPath.replace("https://localhost:8000", "");
+  }
+
+  useEffect(() => {
+    if (stt !== '1') return;
+    if (!fetchPath) {
+      setError("표시할 STT 결과 URL이 없습니다.");
+      return;
+    }
+    (async () => {
+      try {
+        const res = await fetch(fetchPath, { credentials: "omit" });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        let text = await res.text();
+        text = text
+          .replace(/'([^']+)'/g, "$1")
+          .replace(/\[\s*/g, "")
+          .replace(/\s*\]/g, "")
+          .replace(/,\s*/g, " ")
+          .replace(/\s{2,}/g, " ");
+        setHtml(text);
+      } catch (e) {
+        setError(`결과를 불러오지 못했어요: ${e.message}`);
+      }
+    })();
+  }, [stt, fetchPath]);
+
+  if (stt !== '1') return null;
+
+  return (
+    <section id="stt-viewer" className="mt-6 -mx-4 sm:mx-0">
+      <div className="border rounded-2xl bg-white p-4 sm:p-6">
+        <h3 className="text-base font-semibold mb-3">발음 분석 결과</h3>
+
+        {error ? (
+          <div className="p-3 rounded-md bg-red-50 border border-red-200 text-sm text-red-700">{error}</div>
+        ) : !html ? (
+          <div className="text-gray-600">불러오는 중…</div>
+        ) : (
+          <>
+            <iframe
+              title="STT Result (cleaned)"
+              srcDoc={html}
+              className="w-full h-[70vh] border rounded-lg"
+            />
+            {/* 안내 문구 2줄 (iframe 아래) */}
+            <div className="mt-3 text-xs text-gray-600 leading-5">
+              <div>[Original Script] 사용자가 업로드한 발표 원고</div>
+              <div>[STT Result] 실제 발화를 음성 인식한 결과</div>
+            </div>
+          </>
+        )}
+      </div>
+    </section>
+  );
+}
+
