@@ -20,6 +20,7 @@ import time, logging, json as _json, platform
 FRONT_ORIGIN = os.getenv("FRONT_ORIGIN", "http://localhost:3000")
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", 50 * 1024 * 1024))  # 50MB
 ALLOWED_AUDIO_EXT = {".wav", ".mp3", ".m4a"}
+ALLOWED_VIDEO_EXT = {".mp4", ".mov", ".mkv", ".avi", ".webm"}
 ALLOWED_TEXT_EXT  = {".txt"}
 JOB_TTL = timedelta(hours=1)
 
@@ -144,15 +145,21 @@ ROOT_DIR = Path(__file__).resolve().parents[1]   # PitchPal/
 CONTENT_RESULT_ROOT = ROOT_DIR / "model" / "content" / "results"
 SPEECH_TMP_ROOT     = ROOT_DIR / "model" / "speech" / "tmp"
 SPEECH_RESULT_ROOT  = ROOT_DIR / "model" / "speech" / "results"
+VIDEO_UPLOAD_ROOT   = ROOT_DIR / "model" / "video" / "uploads"
+VIDEO_RESULT_ROOT   = ROOT_DIR / "model" / "video" / "results"
 
 CONTENT_RESULT_ROOT.mkdir(parents=True, exist_ok=True)
 SPEECH_TMP_ROOT.mkdir(parents=True, exist_ok=True)
 SPEECH_RESULT_ROOT.mkdir(parents=True, exist_ok=True)
+VIDEO_UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
+VIDEO_RESULT_ROOT.mkdir(parents=True, exist_ok=True)
 
 # 정적 파일 서빙 (세션 디렉터리 포함)
 app.mount("/static", StaticFiles(directory=str(CONTENT_RESULT_ROOT)), name="static")
 app.mount("/static-speech", StaticFiles(directory=str(SPEECH_RESULT_ROOT)), name="static-speech")
 app.mount("/model/speech/results", StaticFiles(directory=str(SPEECH_RESULT_ROOT)), name="speech-results-alias")
+# ★ 영상/모델 전체 접근(프론트 JSON 링크용)
+app.mount("/model", StaticFiles(directory=str(ROOT_DIR / "model")), name="model-root")
 
 # -----------------------------------------------------
 # 공통 유틸
@@ -349,6 +356,38 @@ def _save_upload_to_tmp(upload: UploadFile, target_dir: Path, fallback_suffix: s
                     raise HTTPException(status_code=413, detail="파일이 너무 큽니다(>50MB).")
                 f.write(chunk)
     return out_path
+
+@app.post("/analyze-video", tags=["video"], summary="영상 분석(깜빡임/머리자세/감정)")
+async def analyze_video_endpoint(video: UploadFile = File(..., description="영상 파일(.mp4 등)")):
+    # 파일 형식 검사(선택)
+    try:
+        if not video.filename:
+            raise HTTPException(status_code=400, detail="video 파일이 필요합니다.")
+        ext = Path(video.filename).suffix.lower() or ".mp4"
+        if ext not in ALLOWED_VIDEO_EXT:
+            raise HTTPException(status_code=400, detail=f"허용되지 않은 영상 형식: {ext}")
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+
+    # 업로드 저장(기존 util 재사용)
+    out_path = _save_upload_to_tmp(video, VIDEO_UPLOAD_ROOT, ".mp4")
+    session_id = uuid.uuid4().hex
+
+    try:
+        from model.video.pipeline import analyze_video as run_pipeline
+        result = run_pipeline(str(out_path), results_root=str(VIDEO_RESULT_ROOT), session_id=session_id)
+        return JSONResponse(content=result)
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Video analysis failed: {e}")
+    finally:
+        try:
+            if out_path.exists():
+                out_path.unlink()
+        except Exception:
+            pass
 
 
 # -----------------------------------------------------
