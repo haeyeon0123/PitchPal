@@ -1,7 +1,7 @@
 # backend/main.py — hardened & session‑scoped
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from typing import Dict, Any, List, Optional, Tuple
@@ -357,37 +357,28 @@ def _save_upload_to_tmp(upload: UploadFile, target_dir: Path, fallback_suffix: s
                 f.write(chunk)
     return out_path
 
-@app.post("/analyze-video", tags=["video"], summary="영상 분석(깜빡임/머리자세/감정)")
-async def analyze_video_endpoint(video: UploadFile = File(..., description="영상 파일(.mp4 등)")):
-    # 파일 형식 검사(선택)
-    try:
-        if not video.filename:
-            raise HTTPException(status_code=400, detail="video 파일이 필요합니다.")
-        ext = Path(video.filename).suffix.lower() or ".mp4"
-        if ext not in ALLOWED_VIDEO_EXT:
-            raise HTTPException(status_code=400, detail=f"허용되지 않은 영상 형식: {ext}")
-    except HTTPException:
-        raise
-    except Exception:
-        pass
+@app.post("/analyze-video", tags=["video"], summary="(호환) 영상 분석 → 비동기 잡 생성만")
+async def analyze_video_endpoint_compat(background_tasks: BackgroundTasks, video: UploadFile = File(...)):
+    # 기존 프론트가 /analyze-video로 올 때를 위해 job 생성만 하고 즉시 반환
+    # 프론트는 받은 job_id로 /video/jobs/{job_id}/status 를 폴링하고, 완료 시 /video/jobs/{job_id}/result 호출
+    if not video.filename:
+        raise HTTPException(status_code=400, detail="video 파일이 필요합니다.")
+    ext = (Path(video.filename).suffix or ".mp4").lower()
+    if ext not in ALLOWED_VIDEO_EXT:
+        raise HTTPException(status_code=400, detail=f"허용되지 않은 영상 형식: {ext}")
 
-    # 업로드 저장(기존 util 재사용)
-    out_path = _save_upload_to_tmp(video, VIDEO_UPLOAD_ROOT, ".mp4")
+    safe_name = Path(video.filename).name
+    dst = VIDEO_UPLOAD_ROOT / f"{uuid.uuid4().hex}_{safe_name}"
+    with dst.open("wb") as f:
+        shutil.copyfileobj(video.file, f)
+
+    job_id = uuid.uuid4().hex
     session_id = uuid.uuid4().hex
+    VIDEO_JOBS[job_id] = {"progress": 8, "status": "queued", "message": "대기 중", "result": None, "ts": datetime.utcnow(), "session_id": session_id}
 
-    try:
-        from model.video.pipeline import analyze_video as run_pipeline
-        result = run_pipeline(str(out_path), results_root=str(VIDEO_RESULT_ROOT), session_id=session_id)
-        return JSONResponse(content=result)
-    except Exception as e:
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Video analysis failed: {e}")
-    finally:
-        try:
-            if out_path.exists():
-                out_path.unlink()
-        except Exception:
-            pass
+    background_tasks.add_task(_analyze_video_job, job_id, session_id, dst)
+    return {"job_id": job_id, "session_id": session_id, "status": "queued"}
+
 
 
 # -----------------------------------------------------
@@ -759,6 +750,140 @@ async def speech_analyze(
 JOBS: Dict[str, Dict[str, Any]] = {}
 SPEECH_JOBS: Dict[str, Dict[str, Any]] = {}
 
+# ===== [2-VIDEO] 비동기 영상 파이프라인 =====
+VIDEO_JOBS: Dict[str, Dict[str, Any]] = {}
+
+def _video_set(job_id: str, **fields):
+    job = VIDEO_JOBS.get(job_id)
+    if not job:
+        return
+    job.update(fields)
+    job["ts"] = datetime.utcnow()
+
+def _ensure_ascii_filename(name: str) -> str:
+    # 한글/공백 문제가 있으면 여기서 정리(선택)
+    return Path(name).name
+
+def _analyze_video_job(job_id: str, session_id: str, src_path: Path):
+    """
+    BackgroundTasks에서 호출되는 동기 함수.
+    무거운 분석은 여기서 실행되고, 진행률은 VIDEO_JOBS에 기록됩니다.
+    """
+    try:
+        _set_status(VIDEO_JOBS, job_id, "running", "작업 시작")
+        _set_progress(VIDEO_JOBS, job_id, 5, "모델/리소스 준비")  # ← 잡 시작 즉시 5%로
+
+
+        # 전처리 단계
+        time.sleep(0.2)
+        _set_progress(VIDEO_JOBS, job_id, 15, "전처리 준비")
+        time.sleep(0.2)
+        _set_progress(VIDEO_JOBS, job_id, 25, "전처리 완료")
+
+        # 분석 세분화 (예: face, blink, pose, emotion 등)
+        _set_progress(VIDEO_JOBS, job_id, 40, "얼굴 검출/랜드마크")
+        time.sleep(0.2)
+        _set_progress(VIDEO_JOBS, job_id, 55, "깜빡임(EAR) 분석")
+        time.sleep(0.2)
+        _set_progress(VIDEO_JOBS, job_id, 70, "머리 자세 분석")
+        time.sleep(0.2)
+        _set_progress(VIDEO_JOBS, job_id, 82, "감정 분류")
+
+        # === 실제 분석 호출 ===
+        from model.video.pipeline import analyze_video as run_pipeline
+        result: Dict[str, Any] = run_pipeline(
+            str(src_path),
+            results_root=str(VIDEO_RESULT_ROOT),
+            session_id=session_id
+        )
+
+        # 매핑/저장 단계
+        _set_progress(VIDEO_JOBS, job_id, 90, "결과 매핑")
+        job_dir = (VIDEO_RESULT_ROOT / session_id)
+        job_dir.mkdir(parents=True, exist_ok=True)
+        out_json = job_dir / "analysis.json"
+        out_json.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        _set_progress(VIDEO_JOBS, job_id, 96, "결과 저장")
+        VIDEO_JOBS[job_id]["result_path"] = str(out_json)
+        VIDEO_JOBS[job_id]["result"] = result
+
+        _set_progress(VIDEO_JOBS, job_id, 100, "완료")
+        _set_status(VIDEO_JOBS, job_id, "done", "완료")
+
+    except Exception as e:
+        traceback.print_exc()
+        _set_status(VIDEO_JOBS, job_id, "error", f"에러: {e}")
+        _set_progress(VIDEO_JOBS, job_id, 100)
+        VIDEO_JOBS[job_id]["result"] = None
+    finally:
+        try:
+            if src_path.exists():
+                src_path.unlink()
+        except Exception:
+            pass
+        _gc_jobs()
+
+@app.post("/video/jobs", tags=["video"], summary="영상 분석 작업 시작(비동기)")
+async def video_start(background_tasks: BackgroundTasks, video: UploadFile = File(...)):
+    if not video.filename:
+        raise HTTPException(status_code=400, detail="video 파일이 필요합니다.")
+    ext = (Path(video.filename).suffix or ".mp4").lower()
+    if ext not in ALLOWED_VIDEO_EXT:
+        raise HTTPException(status_code=400, detail=f"허용되지 않은 영상 형식: {ext}")
+
+    # 업로드 저장
+    safe_name = _ensure_ascii_filename(video.filename)
+    dst = VIDEO_UPLOAD_ROOT / f"{uuid.uuid4().hex}_{safe_name}"
+    with dst.open("wb") as f:
+        shutil.copyfileobj(video.file, f)
+
+    # 잡 생성
+    job_id = uuid.uuid4().hex
+    session_id = uuid.uuid4().hex
+    VIDEO_JOBS[job_id] = {
+        "progress": 0, "status": "queued", "message": "대기 중",
+        "result": None, "ts": datetime.utcnow(), "session_id": session_id
+    }
+
+    # 백그라운드 실행(동기 함수 호출)
+    background_tasks.add_task(_analyze_video_job, job_id, session_id, dst)
+    return {"job_id": job_id, "session_id": session_id, "status": "queued"}
+
+@app.get("/video/jobs/{job_id}/status", tags=["video"], summary="영상 작업 진행률 조회")
+async def video_status(job_id: str):
+    _gc_jobs()
+    job = VIDEO_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="job_id 없음")
+    return {
+        "job_id": job_id,
+        "status": job.get("status", "queued"),
+        "progress": job.get("progress", 0),
+        "message": job.get("message", ""),
+    }
+
+@app.get("/video/jobs/{job_id}/result", tags=["video"], summary="영상 분석 결과 조회")
+async def video_result(job_id: str):
+    _gc_jobs()
+    job = VIDEO_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="job_id 없음")
+    if job["status"] != "done" or not job.get("result_path"):
+        raise HTTPException(status_code=202, detail="아직 처리 중이거나 결과가 없습니다.")
+
+    path = Path(job["result_path"])
+    if not path.exists():
+        raise HTTPException(status_code=500, detail="result file missing")
+
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return {"ready": True, "result": data, "session_id": job.get("session_id")}
+    except Exception:
+        # 파일이 매우 크면 파일 그대로 내려도 됨
+        return FileResponse(path)
+    
+
 
 def _set_progress(job_dict: Dict[str, Dict[str, Any]], job_id: str, value: int, message: str = ""):
     job = job_dict.get(job_id)
@@ -782,11 +907,12 @@ def _set_status(job_dict: Dict[str, Dict[str, Any]], job_id: str, status: str, m
 
 def _gc_jobs():
     now = datetime.utcnow()
-    for store in (JOBS, SPEECH_JOBS):
+    for store in (JOBS, SPEECH_JOBS, VIDEO_JOBS):   # ★ VIDEO_JOBS 추가
         for k, v in list(store.items()):
             ts = v.get("ts", now)
             if now - ts > JOB_TTL:
                 store.pop(k, None)
+
 
 
 async def _ticker(job_dict: Dict[str, Dict[str, Any]], job_id: str, until: int = 90, step_ms: int = 400):

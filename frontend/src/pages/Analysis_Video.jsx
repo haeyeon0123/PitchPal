@@ -24,7 +24,8 @@ import {
 /* ===================== API 설정 ===================== */
 const API_BASE =
   (process.env.REACT_APP_API_BASE || "http://localhost:8000").replace(/\/+$/, "");
-const VIDEO_ENDPOINT = "/analyze-video";
+// 비동기 잡 생성용 엔드포인트
+const VIDEO_JOBS_ENDPOINT = "/video/jobs";
 
 /* ===================== Colors ===================== */
 const COLOR_PRIMARY = "#5686C4";
@@ -250,13 +251,80 @@ function normalizeHeadPose(data) {
 export default function Analysis_Video() {
   const [phase, setPhase] = useState("idle");
 
-  const videoRef = useRef(null);
+  const videoBoxRef = useRef(null); // ← 영상 카드 컨테이너 ref
+  const videoRef = useRef(null);    // ← 영상 <video> 엘리먼트 ref
   const [fileObj, setFileObj] = useState(null);
   const [fileUrl, setFileUrl] = useState("");
   const [fileName, setFileName] = useState("");
   const [progress, setProgress] = useState(0);
-
   const [notice, setNotice] = useState("");
+
+  // ===== Progress smoothing (부드럽게 증가) =====
+  const progressRef = useRef(0);
+  const targetRef   = useRef(0);
+  const tickRef     = useRef(null);
+  const isSmoothingRef = useRef(false);
+
+  const startSmooth = useCallback(() => {
+    if (isSmoothingRef.current) return;
+    if (tickRef.current) clearInterval(tickRef.current);
+
+    const tick = () => {
+      const cur = progressRef.current;
+      const tgt = targetRef.current;
+      if (cur >= tgt) return;
+      const step = Math.max(1, Math.ceil((tgt - cur) * 0.15)); // 남은 차의 15%
+      const next = Math.min(tgt, cur + step);
+      progressRef.current = next;
+      setProgress(next);
+     };
+     // ★ 첫 틱 즉시
+    tick();
+    // 이후 주기
+    tickRef.current = setInterval(tick, 120);
+    isSmoothingRef.current = true;
+  }, []);
+
+  const stopSmooth = useCallback(() => {
+    if (tickRef.current) {
+      clearInterval(tickRef.current);
+      tickRef.current = null;
+    }
+    isSmoothingRef.current = false;
+  }, []);
+
+  const bumpTarget = useCallback((p) => {
+    const clamped = Math.max(0, Math.min(99, Math.floor(p)));
+    targetRef.current = Math.max(targetRef.current, clamped);
+  }, []);
+
+  const stageToTarget = useCallback((status, message = "") => {
+    // 백엔드에서 내려주는 message를 기반으로 "단계별" 상한선을 매핑
+    // 업로드 0~60 → 큐 대기 65 → 전처리 72 → 얼굴검출 78 → 깜빡임 84 → 머리자세 90 → 감정 93 → 매핑 96 → 저장 98
+    const s = String(status || "").toLowerCase();
+    const msg = String(message || "").toLowerCase();
+
+    // 큐 대기
+    if (s === "queued" || /대기|queued/.test(msg)) return 65;
+
+    // 전처리
+    if (/전처리|preprocess/.test(msg)) return 72;
+    // 얼굴/랜드마크
+    if (/얼굴|랜드마크|face|landmark/.test(msg)) return 78;
+    // 깜빡임(EAR)
+    if (/깜빡임|ear|blink/.test(msg)) return 84;
+    // 머리 자세/포즈
+    if (/머리|자세|pose|head/.test(msg)) return 90;
+    // 감정
+    if (/감정|emotion/.test(msg)) return 93;
+    // 결과 매핑
+    if (/매핑|mapping|map/.test(msg)) return 96;
+    // 저장
+    if (/저장|saving|write/.test(msg)) return 98;
+
+    if (!status || s === "unknown") return Math.max(62, targetRef.current); // 안전망
+    return Math.min(98, targetRef.current + 1); // 모르는 단계면 살짝씩 전진
+  }, []);
 
   const DEMO_LEN = 118;
   const [series, setSeries] = useState(() => ({ ...genDummySeries(DEMO_LEN), headPose: null }));
@@ -271,6 +339,11 @@ export default function Analysis_Video() {
     else document.body.style.overflowY = prev || "";
     return () => { document.body.style.overflowY = prev || ""; };
   }, [phase]);
+
+  // 컴포넌트 언마운트/리셋 시 타이머 정리
+  useEffect(() => {
+    return () => stopSmooth();
+  }, [stopSmooth]);
 
   /* ========== 도메인 데이터 파생 (차트/카드 계산) ========== */
   const earData = useMemo(() => (series.ear || []).map((v, i) => ({ t: i, ear: v })), [series.ear]);
@@ -321,8 +394,54 @@ export default function Analysis_Video() {
   const poseStatus = (poseRatio["정면"] || 0) >= 0.6 ? "좋음" : (poseRatio["정면"] || 0) >= 0.45 ? "보통" : "주의";
   const blinkStatus = blinkSummary?.grade || ((blinksPerMinLocal >= 10 && blinksPerMinLocal <= 20) ? "정상" : blinksPerMinLocal < 10 ? "낮음" : "주의");
 
+  /* ===================== Background Job Helpers ===================== */
+async function createVideoJob(file) {
+  const fd = new FormData();
+  fd.append("video", file);
+  const { data } = await axios.post(`${API_BASE}${VIDEO_JOBS_ENDPOINT}`, fd, {
+    headers: { "Content-Type": "multipart/form-data" },
+    timeout: 0, // 업로드는 시간 제한 두지 않음
+    onUploadProgress: (e) => {
+      // 업로드 진행률은 외부에서 세팅하도록 콜백을 받도록 하려면 확장 가능
+    },
+  });
+  // 기대 응답: { job_id, session_id, status: "queued" }
+  if (!data?.job_id) {
+    // 혹시 /analyze-video(호환)로부터 job_id를 받는 구조라면 동일 처리
+    if (data?.session_id && data?.status) return data.job_id;
+    throw new Error("job_id가 응답에 없습니다.");
+  }
+  return data.job_id;
+}
+
+async function pollVideoJobUntilDone(jobId, onTick) {
+  // onTick(status, progress, message)
+  const statusUrl = `${API_BASE}/video/jobs/${jobId}/status`;
+  const resultUrl = `${API_BASE}/video/jobs/${jobId}/result`;
+
+  while (true) {
+    const { data: st } = await axios.get(statusUrl, { timeout: 15000 });
+    onTick?.(st.status, st.progress ?? 0, st.message || "");
+
+    if (st.status === "done") {
+      const { data: res } = await axios.get(resultUrl, { timeout: 20000 });
+      if (!res?.ready && res?.result == null) {
+        throw new Error("결과가 아직 준비되지 않았습니다.");
+      }
+      // 기대 응답: { ready:true, result:{...}, session_id }
+      return res.result || res;
+    }
+    if (st.status === "error") {
+      throw new Error(st.message || "영상 분석 실패");
+    }
+    await new Promise((r) => setTimeout(r, 1500)); // 1.5초 간격
+  }
+}
+
+  
   /* ========== 업로드/분석 핸들러 ========== */
   const resetUpload = useCallback(() => {
+    stopSmooth();           // ★ 진행바 스무딩 종료
     setFileObj(null);
     setFileName("");
     setFileUrl("");
@@ -331,7 +450,7 @@ export default function Analysis_Video() {
     setPhase("idle");
     setSeries({ ...genDummySeries(DEMO_LEN), headPose: null });
     setBlinkSummary(null);
-  }, []);
+  }, [stopSmooth]);
 
   const handleFilePick = useCallback((file) => {
     if (!file) return;
@@ -342,126 +461,178 @@ export default function Analysis_Video() {
     setNotice("");
   }, []);
 
-  const analyze = useCallback(async () => {
-    if (!fileObj) return;
+ const analyze = useCallback(async () => {
+  if (!fileObj) return;
 
-    try {
-      setPhase("analyzing");
-      setProgress(0);
-      setNotice("");
+  try {
+    setPhase("analyzing");
+    setNotice("");
+    // ★ 눈에 보이는 시작값을 먼저 그린다(0%로 오래 보이는 문제 방지)
+    progressRef.current = 8;
+    targetRef.current   = 8;
+    setProgress(8);
+    // 그 다음 스무딩 시작
+    startSmooth();
 
-      const fd = new FormData();
-      fd.append("video", fileObj);
+    // ★ 즉시 렌더링 유도 (일부 브라우저에서 첫 setInterval 틱 전까지 0%로 보이는 문제 회피)
+    progressRef.current = Math.max(progressRef.current, 1);
+    targetRef.current   = Math.max(targetRef.current, 1);
+    setProgress((p) => (p < 1 ? 1 : p));
 
-      const { data } = await axios.post(`${API_BASE}${VIDEO_ENDPOINT}`, fd, {
-        headers: { "Content-Type": "multipart/form-data" },
-        onUploadProgress: (e) => {
-          if (e.total) {
-            const pct = Math.round((e.loaded / e.total) * 100);
-            setProgress(Math.min(99, Math.max(1, pct)));
-          }
-        },
-        timeout: 300000,
-      });
+    // 1) 잡 생성(업로드)
+    let uploadedPct = 0;
+    const fd = new FormData();
+    fd.append("video", fileObj);
 
-      // ====== 응답 파싱 ======
-      const ear = data?.ear || data?.ear_series || data?.timeline?.ear || [];
-      const pitch = data?.pitch || data?.pitch_series || data?.timeline?.pitch || [];
+    const { data: jobResp } = await axios.post(`${API_BASE}${VIDEO_JOBS_ENDPOINT}`, fd, {
+      headers: { "Content-Type": "multipart/form-data" },
+      timeout: 0, // 업로드는 무제한
+      onUploadProgress: (e) => {
+        if (e.total) {
+        const pct = Math.round((e.loaded / e.total) * 100);
+        bumpTarget(Math.min(60, Math.max(targetRef.current, 8, pct))); // ✅ 업로드는 60%까지만
+        }
+      },
+    });
 
-      // 7감정 분포
-      const dist = data?.distribution || null;   // {angry:0.03,...}
-      const counts = data?.counts || null;       // {angry:16,...}
-      let emotion_dist7 = null;
+    const jobId = jobResp?.job_id;
+    if (!jobId) throw new Error("job_id 없음");
 
-      if (dist && Object.keys(dist).length) {
-        emotion_dist7 = { ...dist };
-      } else if (counts && Object.keys(counts).length) {
-        const total = Object.values(counts).reduce((a,b)=>a+b,0) || 1;
-        emotion_dist7 = {};
-        EMOTION_ORDER.forEach(k => emotion_dist7[k] = (counts[k]||0)/total);
-      }
+    bumpTarget(Math.max(15, targetRef.current)); // 업로드 콜백 거의 없던 케이스 대비 최저선
+    bumpTarget(65); // 대기 단계
 
-      const emotion_warning = data?.warning || "";
-      const most_common_emotion = data?.most_common_emotion || null;
-      const negative_ratio = (typeof data?.negative_emotion_ratio === "number")
-        ? data.negative_emotion_ratio
-        : (emotion_dist7
-           ? (emotion_dist7.angry||0)+(emotion_dist7.disgust||0)+(emotion_dist7.scared||0)+(emotion_dist7.sad||0)+(emotion_dist7.surprised||0)
-           : 0);
-
-      // 팀원 JSON 깜빡임 요약
-      const rawBlink =
-        data?.blink_summary ??
-        data?.summary?.blink ??
-        data?.blink?.summary ?? null;
-
-      if (rawBlink) {
-        setBlinkSummary(normalizeBlinkSummary(rawBlink));
+    // 2) 폴링으로 진행률 갱신
+    const result = await pollVideoJobUntilDone(jobId, (status, prog, msg) => {
+      const mapped = stageToTarget(status, msg); // 단계 기준 목표
+      if (typeof prog === "number") {
+        // 서버 수치와 단계 목표 중 더 큰 값을 취하면서도 96을 넘지 않도록
+        bumpTarget(Math.min(96, Math.max(stageToTarget(status, msg), prog)));
       } else {
-        // 서버에 요약이 없으면 로컬 계산값으로 더미 구성
-        const localCount = detectBlinks(ear || []).length;
-        const localFreq = Math.round(((localCount || 0) / Math.max(1, (ear?.length || 1) / 60)) * 10) / 10;
-        setBlinkSummary(normalizeBlinkSummary({
-          "눈 깜빡임 횟수": localCount,
-          "눈 깜빡임 빈도 (회/분)": localFreq,
-          "눈 깜빡임 평가 등급": (localFreq>=10 && localFreq<=20) ? "정상" : localFreq<10 ? "낮음" : "주의",
-          "눈 깜빡임 해석": localFreq>=10 && localFreq<=20 ? "안정된 상태" : localFreq>=21 ? "약간의 긴장 상태" : "",
-        }));
+        bumpTarget(mapped);
       }
+      if (status === "running") startSmooth();
+      if (status === "done" || status === "error") stopSmooth();
+      if (msg) setNotice(msg);
+     });
 
-      // ✅ 고개 각도(head pose) — ratio 응답 연동
-      const headPose = normalizeHeadPose({
-        head_pose: data?.head_pose,             // { "looking front ratio": 0.62, ... } 가능
-        head_pose_summary: data?.head_pose_summary,
-        head_pose_records: data?.head_pose_records,
-        ratios: data?.ratios,
-        records: data?.records,
-      });
 
-      if (!ear.length && !pitch.length && !emotion_dist7 && !headPose) {
-        throw new Error("서버 응답에 분석 결과가 없습니다.(ear/pitch/distribution/head_pose)");
-      }
+    // ====== 응답 파싱 ======
+    const data = result; // 백엔드 /video/jobs/{id}/result 가 {result: {...}}로 내려줌
+    const ear = data?.ear || data?.ear_series || data?.timeline?.ear || [];
+    const pitch = data?.pitch || data?.pitch_series || data?.timeline?.pitch || [];
 
-      setSeries({
-        ear,
-        pitch,
-        emotion_dist7,
-        emotion_warning,
-        most_common_emotion,
-        negative_ratio,
-        headPose, // ✅ 저장
-      });
-
-      setProgress(100);
-      setPhase("done");
-    } catch (err) {
-      console.error(err);
-      setNotice(
-        "분석 API 호출 실패 → 예시 데이터로 표시합니다. 엔드포인트/파라미터를 확인해주세요."
-      );
-      setSeries({ ...genDummySeries(DEMO_LEN), headPose: null });
-      setBlinkSummary(normalizeBlinkSummary({
-        "눈 깜빡임 횟수": 12,
-        "눈 깜빡임 빈도 (회/분)": 22.3,
-        "눈 깜빡임 평가 등급": "주의",
-        "눈 깜빡임 해석": "약간의 긴장 상태",
-      }));
-      setProgress(100);
-      setPhase("done");
+    // 7감정 분포
+    const dist = data?.distribution || null;   // {angry:0.03,...}
+    const counts = data?.counts || null;       // {angry:16,...}
+    let emotion_dist7 = null;
+    if (dist && Object.keys(dist).length) {
+      emotion_dist7 = { ...dist };
+    } else if (counts && Object.keys(counts).length) {
+      const total = Object.values(counts).reduce((a,b)=>a+b,0) || 1;
+      emotion_dist7 = {};
+      EMOTION_ORDER.forEach(k => emotion_dist7[k] = (counts[k]||0)/total);
     }
-  }, [fileObj]);
 
-  const onRestart = useCallback(() => {
-    if (videoRef.current) { videoRef.current.currentTime = 0; videoRef.current.pause(); }
-    window.scrollTo({ top: 0, behavior: "smooth" });
-    resetUpload();
-  }, [resetUpload]);
+    const emotion_warning = data?.warning || "";
+    const most_common_emotion = data?.most_common_emotion || null;
+    const negative_ratio = (typeof data?.negative_emotion_ratio === "number")
+      ? data.negative_emotion_ratio
+      : (emotion_dist7
+          ? (emotion_dist7.angry||0)+(emotion_dist7.disgust||0)+(emotion_dist7.scared||0)+(emotion_dist7.sad||0)+(emotion_dist7.surprised||0)
+          : 0);
+
+    // 깜빡임 요약
+    const rawBlink = data?.blink_summary ?? data?.summary?.blink ?? data?.blink?.summary ?? null;
+    if (rawBlink) {
+      setBlinkSummary(normalizeBlinkSummary(rawBlink));
+    } else {
+      const localCount = detectBlinks(ear || []).length;
+      const localFreq = Math.round(((localCount || 0) / Math.max(1, (ear?.length || 1) / 60)) * 10) / 10;
+      setBlinkSummary(normalizeBlinkSummary({
+        "눈 깜빡임 횟수": localCount,
+        "눈 깜빡임 빈도 (회/분)": localFreq,
+        "눈 깜빡임 평가 등급": (localFreq>=10 && localFreq<=20) ? "정상" : localFreq<10 ? "낮음" : "주의",
+        "눈 깜빡임 해석": localFreq>=10 && localFreq<=20 ? "안정된 상태" : localFreq>=21 ? "약간의 긴장 상태" : "",
+      }));
+    }
+
+    // 고개 각도(head pose)
+    const headPose = normalizeHeadPose({
+      head_pose: data?.head_pose,
+      head_pose_summary: data?.head_pose_summary,
+      head_pose_records: data?.head_pose_records,
+      ratios: data?.ratios,
+      records: data?.records,
+    });
+
+    if (!ear.length && !pitch.length && !emotion_dist7 && !headPose) {
+      throw new Error("서버 응답에 분석 결과가 없습니다.(ear/pitch/distribution/head_pose)");
+    }
+
+    setSeries({
+      ear,
+      pitch,
+      emotion_dist7,
+      emotion_warning,
+      most_common_emotion,
+      negative_ratio,
+      headPose,
+    });
+
+    bumpTarget(100);
+    setProgress(100);
+    setNotice("");
+    setPhase("done");
+    stopSmooth();
+
+  } catch (err) {
+    console.error(err);
+    setNotice("분석 API 호출 실패 → 예시 데이터로 표시합니다. 엔드포인트/파라미터를 확인해주세요.");
+    setSeries({ ...genDummySeries(DEMO_LEN), headPose: null });
+    setBlinkSummary(normalizeBlinkSummary({
+      "눈 깜빡임 횟수": 12,
+      "눈 깜빡임 빈도 (회/분)": 22.3,
+      "눈 깜빡임 평가 등급": "주의",
+      "눈 깜빡임 해석": "약간의 긴장 상태",
+    }));
+    bumpTarget(100);
+    setProgress(100);
+    setPhase("done");
+    stopSmooth();
+  }
+}, [fileObj, startSmooth, bumpTarget, stopSmooth]);
+
+
+const onRestart = useCallback(() => {
+  if (videoRef.current) {
+    videoRef.current.currentTime = 0;
+    videoRef.current.pause();
+  }
+  window.scrollTo({ top: 0, behavior: "smooth" });
+  resetUpload();
+}, [resetUpload]);
+
+// ✅ 여기 추가
+const handlePlayVideo = useCallback(() => {
+  if (videoBoxRef.current) {
+    videoBoxRef.current.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
+  setTimeout(() => {
+    if (videoRef.current) {
+      try { videoRef.current.play(); } catch {}
+    }
+  }, 150);
+}, []);
+
 
   const seekTo = (sec) => {
     if (videoRef.current && phase === "done") {
-      videoRef.current.currentTime = Math.max(0, Math.min(sec, DURATION_SEC - 1));
-      videoRef.current.play();
-    }
+        videoRef.current.currentTime = Math.max(0, Math.min(sec, DURATION_SEC - 1));
+        videoRef.current.play();
+        if (videoBoxRef.current) {
+          videoBoxRef.current.scrollIntoView({ behavior: "smooth", block: "center" });
+        }
+      }
   };
 
   // 감정 배지/문구
@@ -471,11 +642,10 @@ export default function Analysis_Video() {
   );
 
   return (
-    <div className="bg-gradient-to-b from-white to-[#f7f9fc]">
-      <div className={`mx-auto max-w-7xl px-5 ${phase !== "done" ? "pt-8 pb-0" : "py-8"}`}>
-
+   <main className="min-h-screen bg-white">
+     <div className="mx-auto w-full max-w-[1400px] px-8 pt-12 pb-16">
         {(phase === "idle" || phase === "analyzing") && (
-          <div className="mx-auto max-w-xl">
+          <div className="mx-auto max-w-xl -mt-1 md:-mt-4">
             <UploadBoxUnified
               fileName={fileName}
               isAnalyzing={phase === "analyzing"}
@@ -493,7 +663,7 @@ export default function Analysis_Video() {
               <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
                 {notice}
                 <div className="text-xs text-amber-800 mt-1">
-                  현재 VIDEO_ENDPOINT: <b>{VIDEO_ENDPOINT}</b> · API_BASE: <b>{API_BASE}</b>
+                  현재 VIDEO_JOBS_ENDPOINT: <b>{VIDEO_JOBS_ENDPOINT}</b> · API_BASE: <b>{API_BASE}</b>
                 </div>
               </div>
             )}
@@ -503,7 +673,7 @@ export default function Analysis_Video() {
                 <UploadBoxUnified compact fileName={fileName} isAnalyzing={false} progress={100} onPick={handleFilePick} onStart={analyze} onReset={resetUpload} />
               </div>
               <div>
-                <div className="rounded-2xl border bg-black/5 p-3">
+                <div ref={videoBoxRef} className="rounded-2xl border bg-black/5 p-3">
                   <video ref={videoRef} src={fileUrl || ""} controls className="aspect-video w-full rounded-xl bg-black" />
                   <div className="mt-3 flex items-center justify-between gap-3 text-sm text-gray-600">
                     <span className="truncate">{fileName || "영상 파일을 선택하세요"}</span>
@@ -713,7 +883,7 @@ export default function Analysis_Video() {
 
             <div className="mt-10 mb-8 flex flex-wrap items-center justify-center gap-3">
               <button
-                onClick={() => videoRef.current?.play()}
+                onClick={handlePlayVideo}
                 className="rounded-lg px-6 py-3 text-sm font-medium text-white shadow-sm hover:opacity-95"
                 style={{ backgroundColor: COLOR_START }}
               >
@@ -729,7 +899,7 @@ export default function Analysis_Video() {
           </>
         )}
       </div>
-    </div>
+    </main> 
   );
 }
 
@@ -845,9 +1015,7 @@ function UploadBoxUnified({ fileName, isAnalyzing, progress, onPick, onStart, on
   const loading = !!isAnalyzing;
   return (
     <div className={`max-w-xl mx-auto ${compact ? "p-6" : "p-8"} border border-gray-200 bg-[#f7f9fc] rounded-lg text-center shadow-sm`}>
-      <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-white">
-        <VideoIcon className="w-6 h-6 text-gray-400" />
-      </div>
+      <VideoIcon className="mx-auto h-12 w-12 text-gray-400 mb-4" />
       <h3 className="text-lg font-medium mb-2">영상 파일 업로드</h3>
       <p className="text-sm text-gray-500 mb-4">.mp4, .mov 파일 업로드 가능</p>
 
