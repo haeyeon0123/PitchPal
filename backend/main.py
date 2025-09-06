@@ -1051,6 +1051,84 @@ def get_latest_speech_result():
 # -----------------------------------------------------
 # 내용분석(동기 + 비동기)
 # -----------------------------------------------------
+# ---- 내용 분석 비동기 잡 저장소 ----
+CONTENT_JOBS: Dict[str, Dict[str, Any]] = {}
+
+@app.post("/content/start", tags=["content"], summary="내용 분석 작업 시작(비동기)")
+async def content_start(background_tasks: BackgroundTasks, body: Dict[str, Any]):
+    script = (body or {}).get("script", "")
+    if not script or not isinstance(script, str):
+        raise HTTPException(status_code=400, detail="script(텍스트)가 필요합니다.")
+
+    # 임시 스크립트 저장
+    tmp_txt = CONTENT_RESULT_ROOT / f"script_{uuid.uuid4().hex}.txt"
+    tmp_txt.write_text(script, encoding="utf-8")
+
+    job_id = uuid.uuid4().hex
+    CONTENT_JOBS[job_id] = {"progress": 0, "status": "queued", "message": "대기 중", "result": None, "ts": datetime.utcnow()}
+
+    background_tasks.add_task(_run_content_pipeline, job_id, tmp_txt)
+    return {"job_id": job_id, "status": "queued"}
+
+@app.get("/content/progress/{job_id}", tags=["content"], summary="내용 분석 진행률 조회")
+async def content_progress(job_id: str):
+    _gc_jobs()
+    job = CONTENT_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="job_id 없음")
+    return {
+        "job_id": job_id,
+        "progress": job.get("progress", 0),
+        "status": job.get("status", "queued"),
+        "message": job.get("message", ""),
+    }
+
+@app.get("/content/result/{job_id}", tags=["content"], summary="내용 분석 결과 조회")
+async def content_result(job_id: str):
+    _gc_jobs()
+    job = CONTENT_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="job_id 없음")
+    if job["status"] != "done" or not job["result"]:
+        raise HTTPException(status_code=202, detail="아직 처리 중이거나 결과가 없습니다.")
+    return job["result"]
+
+async def _run_content_pipeline(job_id: str, tmp_txt: Path):
+    ticker_task = None
+    try:
+        _set_status(CONTENT_JOBS, job_id, "running", "작업 시작")
+        _set_progress(CONTENT_JOBS, job_id, 5, "입력 저장")
+        ticker_task = asyncio.create_task(_ticker(CONTENT_JOBS, job_id, until=95, step_ms=450))
+
+        loop = asyncio.get_running_loop()
+        async with _ExecSemaphore:
+            with stage("content_pipeline"):
+                _set_progress(CONTENT_JOBS, job_id, 30, "교정/분석 중")
+                payload = await loop.run_in_executor(None, lambda: run_spellcheck_and_analysis(str(tmp_txt)))
+
+            with stage("content_build_response"):
+                _set_progress(CONTENT_JOBS, job_id, 95, "응답 구성")
+                resp = build_content_response(payload)
+                CONTENT_JOBS[job_id]["result"] = resp
+
+        _set_progress(CONTENT_JOBS, job_id, 100, "완료")
+        _set_status(CONTENT_JOBS, job_id, "done", "완료")
+    except Exception as e:
+        traceback.print_exc()
+        _set_status(CONTENT_JOBS, job_id, "error", f"에러: {e}")
+        _set_progress(CONTENT_JOBS, job_id, 100)
+        CONTENT_JOBS[job_id]["result"] = None
+    finally:
+        try:
+            if ticker_task: ticker_task.cancel()
+        except Exception:
+            pass
+        try:
+            if tmp_txt.exists(): tmp_txt.unlink()
+        except Exception:
+            pass
+        _gc_jobs()
+
 @app.post("/content/run", tags=["content"], summary="내용 분석(동기)")
 async def content_run(script: str = Form(...)):
     with stage("content_save_script"):

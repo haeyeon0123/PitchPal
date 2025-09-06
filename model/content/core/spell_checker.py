@@ -180,7 +180,8 @@ def run_spellcheck_and_analysis(input_path):
     payload = {
         "meta": {
             "source_text_path": input_path,
-            "language": "ko"
+            "language": "ko",
+            "html_url": "/static/corrected_result.html"
         },
         "spell_check": {
             "original_text": original_text,

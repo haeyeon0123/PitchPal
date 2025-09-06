@@ -94,14 +94,15 @@ def perform_analysis(corrected_text,
 
     # ===== HTML 저장 =====
     os.makedirs(os.path.dirname(html_path), exist_ok=True)
-    with open(html_path, 'a', encoding='utf-8') as f:
-        f.write(f"""
+    with open(html_path, "a", encoding="utf-8") as f:
+        f.write(
+            """
         <div class="section">
-            <h2>발표 내용 피드백</h2>
-            <div class="feedback" style="white-space: pre-wrap;">{feedback_data.get('feedback')}</div>
+        <h2>발표 내용 피드백</h2>
+        <div class="feedback" style="white-space: pre-wrap;">{feedback}</div>
         </div>
-        </body></html>
-        """)
+        """.format(feedback=(feedback_data or {}).get("feedback", ""))
+            )
     print(f"내용 피드백 결과 HTML 저장 완료: {html_path}")
 
     # ===== JSON 저장 =====
@@ -110,7 +111,7 @@ def perform_analysis(corrected_text,
         "meta": {
             "created_at": datetime.now(timezone(timedelta(hours=9))).isoformat(),
             "source_text_path": "",  # 필요시 경로 입력
-            "html_url": html_path,
+            "html_url": "/static/corrected_result.html",
             "language": "ko"
         },
         "spell_check": {
