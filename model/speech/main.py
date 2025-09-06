@@ -66,21 +66,3 @@ if __name__ == "__main__":
     print(f"\n📁 결과가 {json_path} 로 저장되었습니다.")
 
     print(f"\n⏱ 총 실행 시간: {time.time() - start:.2f}초")
-    }])
-
-    # 학습된 평가 모델 로드 및 예측 수행
-    evaluator = SpeechEvaluator()
-    evaluator.load_model()
-    predicted_df, cluster_id = evaluator.predict(input_df)
-
-    # 예측 결과 출력
-    print("\n📊 예측된 발표 평가 점수:")
-    print(predicted_df.to_string(index=False))
-
-    # 리포트 JSON 저장
-    json_path = os.path.join(RESULT_DIR, "predicted_report.json")
-    predicted_df.to_json(json_path, orient="records", force_ascii=False, indent=2)
-    print(f"\n📁 결과가 {json_path} 로 저장되었습니다.")
-
-
-    print(f"\n⏱ 총 실행 시간: {time.time() - start:.2f}초")
