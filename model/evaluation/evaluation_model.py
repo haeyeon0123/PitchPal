@@ -17,7 +17,6 @@ from sklearn.multioutput import MultiOutputRegressor
 
 from model.speech.core.speech_analysis import analyze_speech
 from model.speech.core.stt_pronunciation import load_whisper_model
-from model.evaluation.evaluation_model import SpeechEvaluator
 
 DEFAULT_MODEL_PATH = "model/evaluation"
 DEFAULT_DATA_PATH = "data/PitchPal_survey2.csv"
