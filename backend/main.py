@@ -8,6 +8,10 @@ from typing import Dict, Any, List, Optional, Tuple
 from pathlib import Path
 import shutil, uuid, json, os
 
+# ✅ .env 로드 추가
+from dotenv import load_dotenv
+load_dotenv()
+
 # 진행률/비동기용
 import asyncio
 import traceback
@@ -230,7 +234,6 @@ def get_in(d: dict, paths: List[List[str]]) -> Optional[Any]:
 
 
 def build_content_response(payload: Optional[dict] = None) -> Dict[str, Any]:
-    """내용 분석 파이프라인 결과(JSON 파일들)를 표준 응답 스키마로 빌드."""
     data = None
     for cand in [
         "corrected_result.json",
@@ -246,29 +249,52 @@ def build_content_response(payload: Optional[dict] = None) -> Dict[str, Any]:
         data = {}
 
     original_text = get_in(data, [["spell_check", "original_text"], ["original_text"]])
-
     corrected_text = get_in(data, [
         ["spell_check", "corrected_text"],
         ["content_feedback", "content_feedback", "corrected_text"],
         ["content_feedback", "corrected_text"],
         ["corrected_text"],
     ])
-
     highlighted_html = get_in(data, [["spell_check", "highlighted_html"], ["highlighted_html"], ["diff_html"], ["html"]])
 
+    # ---- feedback_text
     feedback_text = get_in(data, [
-        ["content_feedback", "content_feedback", "feedback_text"],
+        ["content_feedback", "content_feedback", "feedback"],
         ["content_feedback", "feedback_text"],
-        ["feedback_text"], ["analysis"], ["comment"],
+        ["content_feedback", "feedback"],
+        ["feedback_text"],
+        ["feedback"],
+        ["analysis"],
+        ["comment"],
     ])
+    if not feedback_text and isinstance(payload, dict):
+        fb2 = get_in(payload, [
+            ["content_feedback", "content_feedback", "feedback"],
+            ["content_feedback", "feedback"],
+            ["feedback_text"],
+            ["feedback"],
+        ])
+        feedback_text = fb2
+    if isinstance(feedback_text, list):
+        feedback_text = "\n".join(f"- {str(x)}" for x in feedback_text)
+    feedback_text = "" if feedback_text is None else str(feedback_text)
 
-    scores_raw = get_in(data, [
+    # ---- scores
+    s_raw = get_in(data, [
         ["content_feedback", "content_feedback", "scores"],
         ["content_feedback", "scores"],
         ["scores"],
     ])
-    scores = scores_raw if isinstance(scores_raw, dict) and len(scores_raw) > 0 else None
+    if not (isinstance(s_raw, dict) and s_raw) and isinstance(payload, dict):
+        s2 = get_in(payload, [
+            ["content_feedback", "content_feedback", "scores"],
+            ["content_feedback", "scores"],
+            ["scores"],
+        ])
+        s_raw = s2
+    scores = s_raw if isinstance(s_raw, dict) and s_raw else None
 
+    # ---- html_url
     html_url: Optional[str] = None
     meta_html = get_in(data, [["meta", "html_url"]])
     if meta_html:
@@ -283,10 +309,10 @@ def build_content_response(payload: Optional[dict] = None) -> Dict[str, Any]:
                     break
         html_url = f"/static/{html_path.name}" if (html_path and html_path.exists()) else None
 
-    # merge meta (file meta <- payload meta 우선)
     meta_from_file = get_in(data, [["meta"]]) or {}
     merged_meta = {**meta_from_file, **(payload or {}).get("meta", {})}
 
+    # ✅ 여기서만 return!
     return {
         "html_url": html_url,
         "original_text": original_text,
@@ -296,6 +322,7 @@ def build_content_response(payload: Optional[dict] = None) -> Dict[str, Any]:
         "scores": scores,
         "meta": merged_meta,
     }
+
 
 # -----------------------------------------------------
 # [음성분석] 응답 스키마 (프론트 표준 매핑)
