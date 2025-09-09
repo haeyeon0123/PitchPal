@@ -13,12 +13,6 @@ import os
 import librosa
 import numpy as np
 
-from model.speech.core.stt_pronunciation import (
-    transcribe_audio,
-    export_differences_to_html,
-    load_whisper_model,
-)
-
 from model.speech.core.stt_pronunciation import transcribe_audio, export_differences_to_html, load_whisper_model
 from model.speech.utils.text_utils import evaluate_pronunciation
 from model.speech.core.filler_words import detect_filler_words  
