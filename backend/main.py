@@ -1,4 +1,4 @@
-# backend/main.py — hardened & session‑scoped
+# backend/main.py — hardened & session-scoped
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse, FileResponse
@@ -71,6 +71,18 @@ class stage:
 from model.content.core.spell_checker import run_spellcheck_and_analysis
 from model.speech.core.speech_analysis import analyze_speech
 from model.evaluation.evaluation_model import SpeechEvaluator
+import pandas as pd
+import numpy as np
+
+# ------ 모델 싱글톤 (메모리 캐시) ------
+_EVALUATOR: SpeechEvaluator | None = None
+def _get_evaluator() -> SpeechEvaluator:
+    global _EVALUATOR
+    if _EVALUATOR is None:
+        ev = SpeechEvaluator()
+        ev.load_model("model/evaluation")
+        _EVALUATOR = ev
+    return _EVALUATOR
 
 # -----------------------------------------------------
 # FastAPI 기본 설정
@@ -166,6 +178,18 @@ app.mount("/model/speech/results", StaticFiles(directory=str(SPEECH_RESULT_ROOT)
 app.mount("/model", StaticFiles(directory=str(ROOT_DIR / "model")), name="model-root")
 
 # -----------------------------------------------------
+# (NEW) 평가 모델 전역 로드(1회)
+# -----------------------------------------------------
+_EVALUATOR: Optional[SpeechEvaluator] = None
+try:
+    _EVALUATOR = SpeechEvaluator()
+    _EVALUATOR.load_model(str(ROOT_DIR / "model" / "evaluation"))
+    log_json("evaluation_model_loaded", ok=True)
+except Exception as e:
+    _EVALUATOR = None
+    log_json("evaluation_model_loaded", ok=False, error=str(e))
+
+# -----------------------------------------------------
 # 공통 유틸
 # -----------------------------------------------------
 class EvaluateBody(BaseModel):
@@ -199,6 +223,68 @@ def _save_speech_json_scoped(session_id: str, file_name: str, data: dict) -> str
     p = sess_dir / file_name
     p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     return f"/model/speech/results/{session_id}/{file_name}"
+
+# -----------------------------------------------------
+# (NEW) 평가 입력 매핑 유틸 (speech_analysis → evaluator 입력)
+# -----------------------------------------------------
+# 학습 시 사용한 피처 순서(evaluation_model.fit의 X열과 동일)
+_FEATURE_ORDER = [
+    '발음 유사도 점수',
+    'MFCC 평균',
+    'MFCC 표준편차',
+    'Pitch 평균 (Hz)',
+    'Pitch 표준편차 (Hz)',
+    'WPM (Words Per Minute)',
+    '무음 구간 비율',
+    '간투사 수'
+]
+
+# 타깃 → UI 점수 키 매핑
+_TARGET_TO_UI = {
+    '발음 정확도': 'pronunciation',
+    '발화 속도':  'speed',
+    '억양':      'intonation',
+    '휴지':      'pause',
+    '간투사':    'filler',
+    # '매끄러움': 'fluency',  # 필요 시 사용
+}
+
+def _agg_mfcc_scalar(x) -> float:
+    """MFCC 평균/표준편차가 벡터이면 평균으로 스칼라화"""
+    try:
+        arr = _np.asarray(x, dtype=float).ravel()
+        return float(_np.mean(arr)) if arr.size else float("nan")
+    except Exception:
+        try:
+            return float(x)
+        except Exception:
+            return float("nan")
+
+def _korean_feats_to_input_df(raw: Dict[str, Any]) -> "pd.DataFrame":
+    import pandas as pd  # 지역 import(기동 가벼움)
+    row = {
+        '발음 유사도 점수': float(raw.get('발음 유사도 점수', _np.nan)),  # ⚠ 학습 단위(0~100 or 0~1) 확인 필요
+        'MFCC 평균':        _agg_mfcc_scalar(raw.get('MFCC 평균', _np.nan)),
+        'MFCC 표준편차':     _agg_mfcc_scalar(raw.get('MFCC 표준편차', _np.nan)),
+        'Pitch 평균 (Hz)':   float(raw.get('Pitch 평균', _np.nan)),
+        'Pitch 표준편차 (Hz)': float(raw.get('Pitch 표준편차', _np.nan)),
+        'WPM (Words Per Minute)': float(raw.get('wpm', _np.nan)),
+        '무음 구간 비율':    float(raw.get('무음 구간 비율', _np.nan)),
+        '간투사 수':         float(raw.get('간투사 수', _np.nan)),
+    }
+    return pd.DataFrame([[row[k] for k in _FEATURE_ORDER]], columns=_FEATURE_ORDER)
+
+def _to_ui_scores(scored_row: Dict[str, float]) -> Dict[str, float]:
+    """evaluator가 만든 0~10 점수 dict → 프론트 키로 변환"""
+    out = {}
+    for k, v in (scored_row or {}).items():
+        ui = _TARGET_TO_UI.get(k)
+        if ui:
+            try:
+                out[ui] = float(v)
+            except Exception:
+                pass
+    return out
 
 
 def _to_float(x, default=0.0):
@@ -669,13 +755,41 @@ def _map_speech_raw_to_response(raw: Dict[str, Any], session_id: str) -> SpeechA
     _save_speech_json_scoped(session_id, "segments_results.json", segments_json)
 
     feedback_text = _make_feedback_text(pron_acc, pitch_mean, wpm, filler_total)
-    scores = {
-        "pronunciation": round(pron_acc * 10, 2),
-        "speed": 7.0, "intonation": 6.0,
-        "filler": max(0.0, 10.0 - min(10.0, float(filler_total))),
-        "pause": max(0.0, 10.0 - round(pause_ratio * 10, 2)),
-        "mfcc": 8.0,
-    }
+    # ------ ① ML 평가모델 점수로 대체 ------
+    try:
+        ev = _get_evaluator()
+        # evaluation_model.py가 기대하는 입력 스키마에 맞춰 feature 구성
+        mfcc_std_avg = float(np.mean(mfcc_std)) if mfcc_std else 0.0
+        mfcc_mean_avg = float(np.mean(mfcc_mean)) if mfcc_mean else 0.0
+        feats = pd.DataFrame([{
+            "발음 유사도 점수":          pron_acc * 100.0,  # 모델은 퍼센트 스케일 사용
+            "MFCC 평균":               mfcc_mean_avg,
+            "MFCC 표준편차":           mfcc_std_avg,
+            "Pitch 평균 (Hz)":         pitch_mean,
+            "Pitch 표준편차 (Hz)":     pitch_std,
+            "WPM (Words Per Minute)":  wpm,
+            "무음 구간 비율":            pause_ratio,
+            "간투사 수":                 filler_total,
+        }])
+        pred_df, _cluster = ev.predict_from_features(feats)
+        # 타깃 컬럼: ['발음 정확도','발화 속도','억양','휴지','간투사','매끄러움'] (0~10)
+        scores = {
+            "pronunciation": float(pred_df.get("발음 정확도", pred_df.mean(axis=1)).iloc[0]),
+            "speed":         float(pred_df.get("발화 속도", pred_df.mean(axis=1)).iloc[0]),
+            "intonation":    float(pred_df.get("억양",     pred_df.mean(axis=1)).iloc[0]),
+            "pause":         float(pred_df.get("휴지",     pred_df.mean(axis=1)).iloc[0]),
+            "filler":        float(pred_df.get("간투사",   pred_df.mean(axis=1)).iloc[0]),
+            "mfcc":          float(pred_df.get("매끄러움", pred_df.mean(axis=1)).iloc[0]),
+        }
+    except Exception as _:
+        # ② 실패 시 기존 휴리스틱으로 폴백(서비스 안전)
+        scores = {
+            "pronunciation": round(pron_acc * 10, 2),
+            "speed": 7.0, "intonation": 6.0,
+            "filler": max(0.0, 10.0 - min(10.0, float(filler_total))),
+            "pause": max(0.0, 10.0 - round(pause_ratio * 10, 2)),
+            "mfcc": 8.0,
+        }
 
     return SpeechAnalysisResponse(
         pronunciation_accuracy=pron_acc,
@@ -769,6 +883,91 @@ async def speech_analyze(
                 if script_path.exists(): script_path.unlink()
             except Exception:
                 pass
+
+
+# -----------------------------------------------------
+# [NEW] 모델 점수 기반 동기 엔드포인트 (/analyze-voice)
+# -----------------------------------------------------
+@app.post("/analyze-voice", tags=["speech"], summary="음성 분석 + 평가모델 점수(0~10) 반환")
+async def analyze_voice_endpoint(
+    audio: UploadFile = File(..., description="음성 파일(.wav/.mp3 등)"),
+    script: UploadFile = File(..., description="대본 텍스트 파일(.txt)"),
+):
+    if not audio.filename or not script.filename:
+        raise HTTPException(status_code=400, detail="audio, script 파일이 모두 필요합니다.")
+    await _ensure_safe_upload(audio, ALLOWED_AUDIO_EXT)
+    await _ensure_safe_upload(script, ALLOWED_TEXT_EXT)
+
+    # 업로드 저장(세션 스코프)
+    session_id = uuid.uuid4().hex
+    audio_path  = _save_upload_to_tmp(audio,  SPEECH_TMP_ROOT, ".wav")
+    script_path = _save_upload_to_tmp(script, SPEECH_TMP_ROOT, ".txt")
+
+    try:
+        # 1) 핵심 분석 실행(speech_analysis.py) — 한글 키 반환
+        with stage("speech_core_analyze", file=audio.filename):
+            raw: Dict[str, Any] = analyze_speech(
+                audio_path=str(audio_path),
+                script_path=str(script_path),
+            )
+            raw["session_id"] = session_id
+
+        # 2) STT HTML 세션 경로 보장(기존 맵퍼와 동일 정책)
+        src_html = SPEECH_RESULT_ROOT / "stt_results.html"
+        dest_dir = SPEECH_RESULT_ROOT / session_id
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest_html = dest_dir / "stt_results.html"
+        if src_html.exists():
+            try:
+                shutil.copyfile(src_html, dest_html)
+            except Exception as e:
+                log_json("stt_copy_error", error=str(e))
+        stt_url = f"/model/speech/results/{session_id}/stt_results.html"
+
+        # 3) 평가 모델 예측(0~10 환산은 evaluator 내부)
+        if _EVALUATOR is None:
+            raise HTTPException(status_code=500, detail="평가 모델이 로드되지 않았습니다.")
+        with stage("eval_build_input"):
+            input_df = _korean_feats_to_input_df(raw)
+        with stage("eval_predict"):
+            scored_df, _cluster = _EVALUATOR.predict_from_features(
+                input_df,
+                save_path=str(ROOT_DIR / "model" / "evaluation" / "results" / "predicted_scores.json")
+            )
+        model_scores = _to_ui_scores(scored_df.iloc[0].to_dict())
+
+        # 4) 응답 스키마(프론트 표준)
+        resp = {
+            "kpis": {
+                "wpm": raw.get("wpm"),
+                "pronunciation_accuracy": raw.get("발음 유사도 점수"),
+                "pause_ratio": raw.get("무음 구간 비율"),
+                "filler_count": raw.get("간투사 수"),
+            },
+            "scores": model_scores,  # ✅ 0~10
+            "features": {
+                "pitch_mean": raw.get("Pitch 평균"),
+                "pitch_std":  raw.get("Pitch 표준편차"),
+                "mfcc_mean":  raw.get("MFCC 평균"),
+                "mfcc_std":   raw.get("MFCC 표준편차"),
+            },
+            "stt_result_url": stt_url,
+            "session_id": session_id,
+        }
+        return JSONResponse(resp)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        log_json("analyze_voice_error", error=str(e))
+        return JSONResponse({"error": str(e)}, status_code=500)
+    finally:
+        # 임시 파일 정리
+        try:
+            if audio_path.exists():  audio_path.unlink()
+            if script_path.exists(): script_path.unlink()
+        except Exception:
+            pass
 
 
 # -----------------------------------------------------

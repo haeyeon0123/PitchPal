@@ -220,13 +220,21 @@ function FillerCard({ total = 0, items = [] }) {
 
 /* ======================= API → UI 매핑 ======================= */
 function mapServiceToUi(api) {
+  const num = (v, lo=0, hi=10) => {
+    const x = Number(v); return Number.isFinite(x) ? Math.max(lo, Math.min(hi, x)) : 0;
+  };
+
   const normProb = (v) => {
     const x = Number(v ?? 0);
     if (!Number.isFinite(x)) return 0;
     return x > 1.5 ? x / 100 : x;
   };
 
+  // ✅ 서버 kpis/feat 우선
+  const kpis = api?.kpis || {};
+  const feats = api?.features || {};
   const pronunciation_accuracy = normProb(
+    kpis?.pronunciation_accuracy ??
     api?.pronunciation_accuracy ??
     api?.["Pronunciation Accuracy"] ??
     (typeof api?.["발음 유사도 점수"] === "number"
@@ -234,14 +242,15 @@ function mapServiceToUi(api) {
       : api?.발음_유사도_점수)
   );
 
-  const wpm = Number(api?.wpm ?? api?.WPM ?? 0);
-  const pause_ratio = Number(api?.pause_ratio ?? api?.["Pause Ratio"] ?? api?.무음_구간_비율 ?? 0);
+  const wpm = Number(kpis?.wpm ?? api?.wpm ?? api?.WPM ?? 0);
+  const pause_ratio = Number(kpis?.pause_ratio ?? api?.pause_ratio ?? api?.["Pause Ratio"] ?? api?.무음_구간_비율 ?? 0);
+
 
   // 총합
   let filler_count = Number(
     api?.["Filler Count"] ??
     (api?.filler && typeof api.filler.total !== 'undefined' ? api.filler.total : undefined) ??
-    api?.filler_count ?? api?.간투사_수 ?? api?.fillerTotal ?? 0
+    kpis?.filler_count ?? api?.filler_count ?? api?.간투사_수 ?? api?.fillerTotal ?? 0
   );
 
   // 세그먼트
@@ -359,9 +368,10 @@ function mapServiceToUi(api) {
   }
 
   // ---- 레이더 점수
-  const pitchMeanGlobal = Number(api?.pitch_mean ?? api?.["Pitch 평균"] ?? NaN);
-  const pitchStdGlobal  = Number(api?.pitch_std  ?? api?.["Pitch 표준편차"] ?? NaN);
-  const mfccStdAvg = Array.isArray(api?.mfcc_std) ? mean(api.mfcc_std.map(Math.abs)) : 0;
+  const pitchMeanGlobal = Number(feats?.pitch_mean ?? api?.pitch_mean ?? api?.["Pitch 평균"] ?? NaN);
+  const pitchStdGlobal  = Number(feats?.pitch_std  ?? api?.pitch_std  ?? api?.["Pitch 표준편차"] ?? NaN);
+  const mfccStdAvg = Array.isArray(feats?.mfcc_std ?? api?.mfcc_std)
+    ? mean((feats?.mfcc_std ?? api?.mfcc_std).map(Math.abs)) : 0;
 
   const speed5  = (() => {
     if (!Number.isFinite(wpm) || wpm <= 0) return 0;
@@ -374,15 +384,29 @@ function mapServiceToUi(api) {
   const intonation5 = Number.isFinite(pitchStdGlobal) ? clamp((pitchStdGlobal / 80) * 5, 0, 5) : 0;
   const mfcc5   = clamp((50 - Math.min(50, mfccStdAvg)) / 50 * 5, 0, 5);
 
+  // ✅ 서버 점수(0~10) 우선, 없으면 기존 계산(0~5)을 0~10으로 승격
+  const serverScores = (api?.scores && typeof api.scores === 'object') ? api.scores : null;
+  const scores10 = serverScores ? {
+    // 🔹 서버 모델 점수 100% 반영 (모두 0~10)
+    pronunciation: num(serverScores.pronunciation),
+    intonation:    num(serverScores.intonation),
+    speed:         num(serverScores.speed),
+    filler:        num(serverScores.filler),
+    pause:         num(serverScores.pause),
+    mfcc:          num(serverScores.mfcc),   // ← MFCC도 서버 점수 우선
+  } : {
+    // 🔹 폴백일 때만 프론트 계산(0~5)을 0~10으로 승격
+    pronunciation: clamp(pronunciation_accuracy * 5, 0, 5) * 2,
+    intonation:    intonation5 * 2,
+    speed:         speed5 * 2,
+    filler:        filler5 * 2,
+    pause:         pause5 * 2,
+    mfcc:          mfcc5 * 2,               // ← 폴백일 때만 사용
+  };
+
   return {
-    scores: {
-      pronunciation: clamp(pronunciation_accuracy * 5, 0, 5),
-      intonation:    intonation5,
-      speed:         speed5,
-      filler:        filler5,
-      pause:         pause5,
-      mfcc:          mfcc5,
-    },
+    // 이제 scores는 0~10 스케일로 반환 (항상 서버 점수 우선)
+    scores: scores10,
     features: { pronunciation_accuracy, wpm, filler_count, pause_ratio },
 
     feedback: api?.feedback_text || api?.feedback || "분석 결과를 불러왔습니다. 상세 항목을 확인해 보세요.",
@@ -511,7 +535,16 @@ export default function AnalysisVoice() {
         }
       }
 
+      // ✅ 디버그: 백엔드 응답에 서버 점수(s) 존재 여부 확인
+      console.log("✅ API raw response:", api);
+      console.log("✅ API scores:", api?.scores);
+      if (!api?.scores) {
+        console.warn("⚠️ No server scores found; using frontend fallback scoring.");
+      }
+
       const ui = mapServiceToUi(api);
+      // ✅ 디버그: 실제 UI에 사용되는 점수(0~10 스케일)
+      console.log("✅ UI scores (used in charts):", ui?.scores);
       setResult(ui);
       setProgress(100);
       setStatusText('완료');
@@ -543,12 +576,12 @@ export default function AnalysisVoice() {
   useEffect(() => {
     if (!result) return;
     setRadarData([
-      { category: "발음",   value: ((result.scores.pronunciation ?? 0) * 2) },
-      { category: "억양",   value: ((result.scores.intonation ?? 0) * 2) },
-      { category: "속도",   value: ((result.scores.speed ?? 0) * 2) },
-      { category: "간투사", value: ((result.scores.filler ?? 0) * 2) },
-      { category: "무음",   value: ((result.scores.pause ?? 0) * 2) },
-      { category: "안정성", value: ((result.scores.mfcc ?? 0) * 2) }
+      { category: "발음",   value: (result.scores?.pronunciation ?? 0) },
+      { category: "억양",   value: (result.scores?.intonation    ?? 0) },
+      { category: "속도",   value: (result.scores?.speed         ?? 0) },
+      { category: "간투사", value: (result.scores?.filler        ?? 0) },
+      { category: "무음",   value: (result.scores?.pause         ?? 0) },
+      { category: "안정성", value: (result.scores?.mfcc          ?? 0) }
     ]);
   }, [result]);
 
@@ -664,9 +697,9 @@ export default function AnalysisVoice() {
 function ResultSection({ result, audioUrl, audioRef, onReplay, onReload, radarData }) {
   const navigate = useNavigate(); // ★ 추가
   
-  // 총점(0~10)
+  // 총점(0~10): 레이더 6개 항목 평균
   const totalScore10 = Number(
-    ((Object.values(result.scores).reduce((a, b) => a + b, 0) / 6) * 2).toFixed(1)
+    ((radarData?.length ? radarData.reduce((s, d) => s + (Number(d.value) || 0), 0) / radarData.length : 0).toFixed(1))
   );
 
 // --- STT 링크 계산 (응답 URL > 세션ID > 루트 > latest) ---
