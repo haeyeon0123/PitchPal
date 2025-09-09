@@ -1,6 +1,7 @@
 // 음성 분석 페이지
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
+import { useSearchParams, useNavigate } from 'react-router-dom';
 import {
   Radar, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis,
   ResponsiveContainer,
@@ -11,7 +12,7 @@ import {
 } from 'recharts';
 import {
   CheckCircle, PauseCircle, Slash, Volume2, Activity, Mic, AudioLines, ExternalLink,
-  Lightbulb
+  Lightbulb, ChevronDown
 } from 'lucide-react';
 
 import { runSpeechAnalysis } from '../services/speechService';
@@ -90,6 +91,15 @@ const getMFCCAvgTuple = (r) => {
   return { mean: avgOf(meanVec), std: avgOf(stdVec) };
 };
 
+// 세션ID 추출(응답 or STT HTML 경로)
+const extractSessionId = (api) => {
+  const direct = api?.session_id || api?.result?.session_id || api?.data?.session_id;
+  if (direct) return String(direct);
+  const url = api?.stt_result_url || api?.stt_results_url || api?.stt_html_url;
+  if (!url) return null;
+  const m = String(url).match(/\/model\/speech\/results\/([a-f0-9]{32})\//i);
+  return m?.[1] || null;
+};
 
 /* ======================= 공용 UI 컴포넌트 ======================= */
 function SectionTitle({ icon, title, hint }) {
@@ -119,7 +129,7 @@ function SectionHeader({ number = "①", title, hint }) {
   );
 }
 
-/* ==== NEW: 침묵/간투사 카드 ==== */
+/* ==== 침묵/간투사 카드 ==== */
 function SilenceCard({ ratioPercent = 0 }) {
   const pct = Math.max(0, Math.min(100, Number(ratioPercent)));
   return (
@@ -138,14 +148,8 @@ function SilenceCard({ ratioPercent = 0 }) {
       <span className="text-sm text-gray-500">전체 발화 중</span>
     </div>
 
-    <div
-      className="mt-3 h-2 w-full bg-gray-100 rounded-full overflow-hidden"
-      aria-hidden
-    >
-      <div
-        className="h-full rounded-full"
-        style={{ width: `${pct}%`, backgroundColor: COLOR_PRIMARY }}
-      />
+    <div className="mt-3 h-2 w-full bg-gray-100 rounded-full overflow-hidden" aria-hidden>
+      <div className="h-full rounded-full" style={{ width: `${pct}%`, backgroundColor: COLOR_PRIMARY }} />
     </div>
 
     <p className="text-xs text-gray-600 mt-auto pt-2">
@@ -155,11 +159,24 @@ function SilenceCard({ ratioPercent = 0 }) {
 );
 }
 
-// ✅ 총합은 props.total로만 표시 (items 합산 X)
+// ==== 간투사 카드 (종류/횟수 중심) ====
+// ==== 간투사 카드 (SilenceCard와 UI 통일) ====
 function FillerCard({ total = 0, items = [] }) {
+  // items: [{ word, count }] 또는 { [word]: count } 둘 다 허용
+  const pairs = Array.isArray(items)
+    ? items.map(it => ({ word: String(it?.word ?? ''), count: Number(it?.count ?? 0) }))
+    : Object.entries(items || {}).map(([word, count]) => ({ word, count: Number(count || 0) }));
+
+  const clean = pairs
+    .filter(it => it.word && Number.isFinite(it.count))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 10); // 상위 10개까지만
+
   const totalNum = Number(total) || 0;
+
   return (
     <div className="p-4 rounded-2xl bg-white shadow-sm border border-gray-100 flex flex-col">
+      {/* 헤더 */}
       <div className="flex items-center justify-between mb-2">
         <h5 className="font-semibold">간투사 사용</h5>
         <span className="text-xs px-2 py-0.5 rounded-full bg-gray-50 text-gray-500 border border-gray-200">
@@ -167,6 +184,7 @@ function FillerCard({ total = 0, items = [] }) {
         </span>
       </div>
 
+      {/* 총합(크게) */}
       <div className="flex items-end gap-2 mb-2">
         <span className="text-3xl font-bold" style={{ color: COLOR_SECONDARY }}>
           {totalNum}회
@@ -174,9 +192,10 @@ function FillerCard({ total = 0, items = [] }) {
         <span className="text-sm text-gray-500">총 사용</span>
       </div>
 
-      {items.length ? (
+      {/* 종류/횟수 목록 */}
+      {clean.length ? (
         <ul className="divide-y divide-gray-100">
-          {items.map((it, i) => (
+          {clean.map((it, i) => (
             <li key={`${it.word}-${i}`} className="py-1.5 text-sm flex justify-between">
               <span className="text-gray-700">{it.word}</span>
               <span className="font-medium" style={{ color: COLOR_SECONDARY }}>
@@ -189,6 +208,7 @@ function FillerCard({ total = 0, items = [] }) {
         <div className="text-sm text-gray-500">간투사 없음 🎉</div>
       )}
 
+      {/* 푸터 설명 */}
       <p className="text-xs text-gray-600 mt-auto pt-2">
         간투사를 줄이면 메시지가 더 명확해져요.
       </p>
@@ -196,16 +216,25 @@ function FillerCard({ total = 0, items = [] }) {
   );
 }
 
+
+
 /* ======================= API → UI 매핑 ======================= */
 function mapServiceToUi(api) {
-  // ---- 기본 KPI ----
+  const num = (v, lo=0, hi=10) => {
+    const x = Number(v); return Number.isFinite(x) ? Math.max(lo, Math.min(hi, x)) : 0;
+  };
+
   const normProb = (v) => {
     const x = Number(v ?? 0);
     if (!Number.isFinite(x)) return 0;
-    return x > 1.5 ? x / 100 : x; // 0~1 또는 0~100 수용
+    return x > 1.5 ? x / 100 : x;
   };
 
+  // ✅ 서버 kpis/feat 우선
+  const kpis = api?.kpis || {};
+  const feats = api?.features || {};
   const pronunciation_accuracy = normProb(
+    kpis?.pronunciation_accuracy ??
     api?.pronunciation_accuracy ??
     api?.["Pronunciation Accuracy"] ??
     (typeof api?.["발음 유사도 점수"] === "number"
@@ -213,17 +242,18 @@ function mapServiceToUi(api) {
       : api?.발음_유사도_점수)
   );
 
-  const wpm = Number(api?.wpm ?? api?.WPM ?? 0);
-  const pause_ratio = Number(api?.pause_ratio ?? api?.["Pause Ratio"] ?? api?.무음_구간_비율 ?? 0);
+  const wpm = Number(kpis?.wpm ?? api?.wpm ?? api?.WPM ?? 0);
+  const pause_ratio = Number(kpis?.pause_ratio ?? api?.pause_ratio ?? api?.["Pause Ratio"] ?? api?.무음_구간_비율 ?? 0);
 
-  // ✅ 간투사 총합: 다양한 경로 지원
+
+  // 총합
   let filler_count = Number(
     api?.["Filler Count"] ??
     (api?.filler && typeof api.filler.total !== 'undefined' ? api.filler.total : undefined) ??
-    api?.filler_count ?? api?.간투사_수 ?? api?.fillerTotal ?? 0
+    kpis?.filler_count ?? api?.filler_count ?? api?.간투사_수 ?? api?.fillerTotal ?? 0
   );
 
-  // ---- 세그먼트 ----
+  // 세그먼트
   const segIn = Array.isArray(api?.segments) ? api.segments : [];
   const stride = Number(api?.segment_stride_sec ?? 5);
 
@@ -247,14 +277,12 @@ function mapServiceToUi(api) {
       })
     : DUMMY_SEGMENTS;
 
-  // ---- 침묵 ----
   const silence = Array.isArray(api?.silence) ? api.silence.map(iv => ({
     start_sec: Number(iv.start_sec ?? iv.start ?? 0),
     end_sec:   Number(iv.end_sec   ?? iv.end   ?? 0),
   })) : [];
 
-  // ---- 간투사 occurrences 단일 소스 생성 ----
-  // 우선순위: top-level `filler_occurrences` → `filler.occurrences` → "Filler Words" → 구형 `api.fillers`
+  // ---- occurrences 통합
   let filler_occurrences = [];
   if (Array.isArray(api?.filler_occurrences)) {
     filler_occurrences = api.filler_occurrences
@@ -296,7 +324,7 @@ function mapServiceToUi(api) {
       .filter(Boolean);
   }
 
-  // ---- 간투사 종류별 집계 ----
+  // ---- 종류별 집계
   let filler_counts_by_type = null;
   if (api?.filler?.by_type && typeof api.filler.by_type === 'object') {
     filler_counts_by_type = api.filler.by_type;
@@ -313,7 +341,7 @@ function mapServiceToUi(api) {
     filler_counts_by_type = m;
   }
 
-  // 총합 보정: occurrences/종류별 합으로 백업
+  // 총합 보정
   if ((!Number.isFinite(filler_count) || filler_count === 0) && filler_occurrences.length) {
     filler_count = filler_occurrences.length;
   }
@@ -321,10 +349,29 @@ function mapServiceToUi(api) {
     filler_count = Object.values(filler_counts_by_type).reduce((a, b) => a + Number(b || 0), 0);
   }
 
-  // ---- 레이더 스코어(0~5) ----
-  const pitchMeanGlobal = Number(api?.pitch_mean ?? api?.["Pitch 평균"] ?? NaN);
-  const pitchStdGlobal  = Number(api?.pitch_std  ?? api?.["Pitch 표준편차"] ?? NaN);
-  const mfccStdAvg = Array.isArray(api?.mfcc_std) ? mean(api.mfcc_std.map(Math.abs)) : 0;
+  // ✅ 여기서 카드용 아이템을 확정 생성
+  let filler_card_items = [];
+  if (filler_counts_by_type && typeof filler_counts_by_type === 'object') {
+    filler_card_items = Object.entries(filler_counts_by_type)
+      .map(([word, count]) => ({ word, count: Number(count || 0) }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 10);
+  } else if (filler_occurrences.length) {
+    const m = new Map();
+    filler_occurrences.forEach(f => {
+      const w = String(f.word ?? '기타');
+      m.set(w, (m.get(w) || 0) + 1);
+    });
+    filler_card_items = Array.from(m, ([word, count]) => ({ word, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 10);
+  }
+
+  // ---- 레이더 점수
+  const pitchMeanGlobal = Number(feats?.pitch_mean ?? api?.pitch_mean ?? api?.["Pitch 평균"] ?? NaN);
+  const pitchStdGlobal  = Number(feats?.pitch_std  ?? api?.pitch_std  ?? api?.["Pitch 표준편차"] ?? NaN);
+  const mfccStdAvg = Array.isArray(feats?.mfcc_std ?? api?.mfcc_std)
+    ? mean((feats?.mfcc_std ?? api?.mfcc_std).map(Math.abs)) : 0;
 
   const speed5  = (() => {
     if (!Number.isFinite(wpm) || wpm <= 0) return 0;
@@ -337,15 +384,29 @@ function mapServiceToUi(api) {
   const intonation5 = Number.isFinite(pitchStdGlobal) ? clamp((pitchStdGlobal / 80) * 5, 0, 5) : 0;
   const mfcc5   = clamp((50 - Math.min(50, mfccStdAvg)) / 50 * 5, 0, 5);
 
+  // ✅ 서버 점수(0~10) 우선, 없으면 기존 계산(0~5)을 0~10으로 승격
+  const serverScores = (api?.scores && typeof api.scores === 'object') ? api.scores : null;
+  const scores10 = serverScores ? {
+    // 🔹 서버 모델 점수 100% 반영 (모두 0~10)
+    pronunciation: num(serverScores.pronunciation),
+    intonation:    num(serverScores.intonation),
+    speed:         num(serverScores.speed),
+    filler:        num(serverScores.filler),
+    pause:         num(serverScores.pause),
+    mfcc:          num(serverScores.mfcc),   // ← MFCC도 서버 점수 우선
+  } : {
+    // 🔹 폴백일 때만 프론트 계산(0~5)을 0~10으로 승격
+    pronunciation: clamp(pronunciation_accuracy * 5, 0, 5) * 2,
+    intonation:    intonation5 * 2,
+    speed:         speed5 * 2,
+    filler:        filler5 * 2,
+    pause:         pause5 * 2,
+    mfcc:          mfcc5 * 2,               // ← 폴백일 때만 사용
+  };
+
   return {
-    scores: {
-      pronunciation: clamp(pronunciation_accuracy * 5, 0, 5),
-      intonation:    intonation5,
-      speed:         speed5,
-      filler:        filler5,
-      pause:         pause5,
-      mfcc:          mfcc5,
-    },
+    // 이제 scores는 0~10 스케일로 반환 (항상 서버 점수 우선)
+    scores: scores10,
     features: { pronunciation_accuracy, wpm, filler_count, pause_ratio },
 
     feedback: api?.feedback_text || api?.feedback || "분석 결과를 불러왔습니다. 상세 항목을 확인해 보세요.",
@@ -355,9 +416,10 @@ function mapServiceToUi(api) {
     segments,
     _globalSilence: silence,
 
-    // ✅ 하단 분석에서 사용할 단일 소스
+    // ✅ 하단 분석에서 바로 쓸 수 있도록 확정치 제공
     filler_occurrences,
     filler_counts_by_type,
+    filler_card_items,
 
     // KPI 블록
     kpi: {
@@ -373,7 +435,6 @@ function mapServiceToUi(api) {
   };
 }
 
-
 /* ======================= 메인 페이지 ======================= */
 export default function AnalysisVoice() {
   const [fileInfo, setFileInfo] = useState({ audio: null, script: null, audioUrl: null });
@@ -382,11 +443,12 @@ export default function AnalysisVoice() {
   const [result, setResult] = useState(null);
   const [radarData, setRadarData] = useState([]);
   const [progress, setProgress] = useState(0);
-  const [statusText, setStatusText] = useState(''); // 진행 상태 텍스트
+  const [statusText, setStatusText] = useState('');
 
   const audioInputRef = useRef(null);
   const scriptInputRef = useRef(null);
   const audioRef = useRef(null);
+  const [searchParams] = useSearchParams();  // ★ 추가
 
   const statusToText = (s) => {
     switch ((s || '').toLowerCase()) {
@@ -399,7 +461,16 @@ export default function AnalysisVoice() {
     }
   };
 
-  /** 실제 FastAPI 호출: multipart 업로드 */
+  // ★ 추가: ?stt 파라미터가 사라질 때(=뒤로가기 등) 결과 섹션(#analysis)로 스크롤
+  useEffect(() => {
+    if (!result) return;
+    const hasStt = searchParams.get('stt') === '1';
+    if (!hasStt) {
+      const el = document.getElementById('analysis') || document.body;
+      el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }, [searchParams, result]);
+
   const handleAnalyze = useCallback(async () => {
     if (!fileInfo.audio || !fileInfo.script) {
       setError('음성 파일(.mp3/.wav)과 대본(.txt) 파일을 모두 선택해주세요.');
@@ -422,84 +493,64 @@ export default function AnalysisVoice() {
         }
       );
 
-      // ✅ 백엔드 표준 segments 결과 재조회 (정식 경로 우선)
-      try {
-        let segResp = await fetch(`/api/speech/segments`, { cache: 'no-store' });
-        if (!segResp.ok) {
-          // 폴백: 예전 프록시 경로가 있을 때
-          segResp = await fetch(`/speech/segments-results`, { cache: 'no-store' });
+      // 세션ID 추출
+      const sessionId = extractSessionId(api);
+
+      // 세그먼트 재조회: 정식 → 정적 폴백
+      if (sessionId) {
+        let seg = null;
+        try {
+          const segResp = await fetch(`${API_BASE}/api/speech/segments/${sessionId}`, { cache: 'no-store' });
+          if (segResp.ok) seg = await segResp.json();
+        } catch (_) {}
+        if (!seg) {
+          try {
+            const segResp2 = await fetch(`${API_BASE}/model/speech/results/${sessionId}/segments_results.json`, { cache: 'no-store' });
+            if (segResp2.ok) seg = await segResp2.json();
+          } catch (_) {}
         }
-        if (segResp.ok) {
-          const seg = await segResp.json();
 
-          // === segments.json → 프론트 표준 구조로 통합 ===
-          // 1) 세그먼트/침묵
-          if (Array.isArray(seg?.segments)) {
-            api.segments = seg.segments; // 각 seg.fillers: [(word,start,end)], seg.silence: [(s,e)]
-          }
-          if (Array.isArray(seg?.silence)) {
-            api.silence = seg.silence;   // 있으면 반영 (없어도 OK)
-          }
+        if (seg) {
+          if (Array.isArray(seg?.segments)) api.segments = seg.segments;
+          if (Array.isArray(seg?.silence))  api.silence  = seg.silence;
 
-          // 2) 간투사 총합 (간투사 수)
           const totalFromSeg =
-            (typeof seg?.["간투사 수"] === 'number' ? seg["간투사 수"] : null) ??
-            (typeof seg?.filler_count === 'number' ? seg.filler_count : null) ??
             (typeof seg?.summary?.filler_count === 'number' ? seg.summary.filler_count : null) ??
-            (typeof seg?.filler?.total === 'number' ? seg.filler.total : null);
+            (typeof seg?.filler?.total === 'number' ? seg.filler.total : null) ??
+            (typeof seg?.filler_count === 'number' ? seg.filler_count : null) ??
+            (typeof seg?.["간투사 수"] === 'number' ? seg["간투사 수"] : null);
+
+          api.filler = api.filler || {};
           if (typeof totalFromSeg === 'number') {
             api.filler_count = totalFromSeg;
-            api.filler = api.filler || {};
             api.filler.total = totalFromSeg;
           }
 
-          // 3) 간투사 종류별 집계 (간투사_빈도 / by_type / summary.fillers_by_type)
-          const byTypeFromSeg =
-            (seg?.["간투사_빈도"] && typeof seg["간투사_빈도"] === 'object' ? seg["간투사_빈도"] : null) ??
-            (seg?.filler?.by_type && typeof seg.filler.by_type === 'object' ? seg.filler.by_type : null) ??
-            (seg?.summary?.fillers_by_type && typeof seg.summary.fillers_by_type === 'object' ? seg.summary.fillers_by_type : null);
-          if (byTypeFromSeg) {
-            api.filler = api.filler || {};
-            api.filler.by_type = byTypeFromSeg;
+          if (seg?.filler?.by_type && typeof seg.filler.by_type === 'object') {
+            api.filler.by_type = seg.filler.by_type;
           }
-
-          // 4) 간투사 발생 리스트: seg.segments[*].fillers → [{word,start,end}]로 정규화
-          if (Array.isArray(seg?.segments)) {
-            const occ = [];
-            for (const s of seg.segments) {
-              const arr = Array.isArray(s?.fillers) ? s.fillers : [];
-              for (const tup of arr) {
-                if (!Array.isArray(tup) || tup.length < 3) continue;
-                const word = String(tup[0]);
-                const start = Number(tup[1]);
-                const end   = Number(tup[2]);
-                if (Number.isFinite(start) && Number.isFinite(end)) {
-                  occ.push({ word, start, end });
-                }
-              }
-            }
-            if (occ.length) {
-              api.filler = api.filler || {};
-              api.filler.occurrences = occ;
-              if (typeof api.filler_count !== 'number') {
-                api.filler_count = occ.length;
-                api.filler.total = occ.length;
-              }
-            }
+          if (Array.isArray(seg?.filler?.occurrences)) {
+            api.filler.occurrences = seg.filler.occurrences;
           }
         }
-      } catch (_) {}
+      }
+
+      // ✅ 디버그: 백엔드 응답에 서버 점수(s) 존재 여부 확인
+      console.log("✅ API raw response:", api);
+      console.log("✅ API scores:", api?.scores);
+      if (!api?.scores) {
+        console.warn("⚠️ No server scores found; using frontend fallback scoring.");
+      }
 
       const ui = mapServiceToUi(api);
+      // ✅ 디버그: 실제 UI에 사용되는 점수(0~10 스케일)
+      console.log("✅ UI scores (used in charts):", ui?.scores);
       setResult(ui);
       setProgress(100);
       setStatusText('완료');
     } catch (e) {
       console.error('analysis error', e);
-      const raw =
-        e?.response?.data?.detail ||
-        e?.message ||
-        '분석 중 오류가 발생했어요.';
+      const raw = e?.response?.data?.detail || e?.message || '분석 중 오류가 발생했어요.';
       setError(raw);
       setProgress(0);
       setStatusText('');
@@ -522,16 +573,15 @@ export default function AnalysisVoice() {
     setRadarData([]);
   };
 
-  // 레이더 차트 데이터(0~10 점수)
   useEffect(() => {
     if (!result) return;
     setRadarData([
-      { category: "발음",   value: ((result.scores.pronunciation ?? 0) * 2) },
-      { category: "억양",   value: ((result.scores.intonation ?? 0) * 2) },
-      { category: "속도",   value: ((result.scores.speed ?? 0) * 2) },
-      { category: "간투사", value: ((result.scores.filler ?? 0) * 2) },
-      { category: "무음",   value: ((result.scores.pause ?? 0) * 2) },
-      { category: "안정성", value: ((result.scores.mfcc ?? 0) * 2) }
+      { category: "발음",   value: (result.scores?.pronunciation ?? 0) },
+      { category: "억양",   value: (result.scores?.intonation    ?? 0) },
+      { category: "속도",   value: (result.scores?.speed         ?? 0) },
+      { category: "간투사", value: (result.scores?.filler        ?? 0) },
+      { category: "무음",   value: (result.scores?.pause         ?? 0) },
+      { category: "안정성", value: (result.scores?.mfcc          ?? 0) }
     ]);
   }, [result]);
 
@@ -637,19 +687,55 @@ export default function AnalysisVoice() {
           radarData={radarData}
         />
       )}
+     {/* URL에 ?stt=1 이 있으면 같은 페이지에 결과 HTML 표시 */}
+     {result && <SttInlineViewer />}
     </div>
   );
 }
 
 /* ======================= 결과 섹션 ======================= */
 function ResultSection({ result, audioUrl, audioRef, onReplay, onReload, radarData }) {
-  const totalScore10 = Number(((Object.values(result.scores).reduce((a, b) => a + b, 0) / 6) * 2).toFixed(1));
+  const navigate = useNavigate(); // ★ 추가
+  
+  // 총점(0~10): 레이더 6개 항목 평균
+  const totalScore10 = Number(
+    ((radarData?.length ? radarData.reduce((s, d) => s + (Number(d.value) || 0), 0) / radarData.length : 0).toFixed(1))
+  );
 
-  // 백엔드가 주는 stt_results_url 우선, 없으면 최신 결과 엔드포인트
-  const sttPath = result?.stt_html_url || '/speech/results/latest';
-  const sttUrl = sttPath.startsWith('http')
-    ? sttPath
-    : `${API_BASE}${sttPath.startsWith('/') ? '' : '/'}${sttPath}`;
+// --- STT 링크 계산 (응답 URL > 세션ID > 루트 > latest) ---
+const sessionIdFromUrl = (() => {
+  const url = result?.stt_html_url;
+  if (!url) return null;
+  const m = String(url).match(/\/model\/speech\/results\/([a-f0-9]{32})\//i);
+  return m?.[1] || null;
+})();
+
+const sttPath =
+  // 1) 백엔드가 정확한 URL을 준 경우
+  (result?.stt_html_url && result.stt_html_url) ||
+  // 2) 세션 경로 예상
+  (sessionIdFromUrl && `/model/speech/results/${sessionIdFromUrl}/stt_results.html`) ||
+  // 3) ✅ 루트에 저장된 경우 
+  `/model/speech/results/stt_results.html` ||
+  // 4) 최후의 수단
+  '/speech/results/latest';
+
+const sttUrl = sttPath.startsWith('http')
+  ? sttPath
+  : `${API_BASE}${sttPath.startsWith('/') ? '' : '/'}${sttPath}`;
+
+  // ★ 수정: 같은 페이지에서 뷰어 토글 (쿼리 파라미터 push)
+  const openSttViewer = () => {
+    if (!sttUrl) return;
+    const next = new URLSearchParams(window.location.search);
+    next.set('stt', '1');
+    next.set('url', sttUrl);
+    navigate({ search: `?${next.toString()}` }, { replace: false });
+    // 뷰어 위치로 스크롤
+    setTimeout(() => {
+      document.getElementById('stt-viewer')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 0);
+  };
 
   return (
     <div className="space-y-10">
@@ -662,51 +748,24 @@ function ResultSection({ result, audioUrl, audioRef, onReplay, onReload, radarDa
 
       {/* KPI */}
       <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-4 sm:gap-6">
-        <ResultCard
-          icon={<CheckCircle />}
-          label="발음 정확도"
-          value={`${((result?.features?.pronunciation_accuracy ?? 0) * 100).toFixed(1)}%`}
-        />
-
-        <ResultCard
-          icon={<Volume2 />}
-          label="발화 속도"
-          value={`${(result?.features?.wpm ?? 0).toFixed(1)} WPM`}
-        />
-
-        {/* 억양 다양성: Pitch 평균 / Pitch 표준편차 */}
+        <ResultCard icon={<CheckCircle />} label="발음 정확도" value={`${((result?.features?.pronunciation_accuracy ?? 0) * 100).toFixed(1)}%`} />
+        <ResultCard icon={<Volume2 />}   label="발화 속도"     value={`${(result?.features?.wpm ?? 0).toFixed(1)} WPM`} />
         <ResultCard
           icon={<Activity />}
           label="억양 다양성"
           value={(() => {
             const { mean, std } = getPitchTuple(result);
-            return (mean != null && std != null)
-              ? `${mean.toFixed(2)} / ${std.toFixed(2)}`
-              : "N/A";
+            return (mean != null && std != null) ? `${mean.toFixed(2)} / ${std.toFixed(2)}` : "N/A";
           })()}
         />
-
-        <ResultCard
-          icon={<Slash />}
-          label="간투사 사용"
-          value={`${result?.features?.filler_count ?? 0}회`}
-        />
-
-        <ResultCard
-          icon={<PauseCircle />}
-          label="무음 비율"
-          value={`${((result?.features?.pause_ratio ?? 0) * 100).toFixed(1)}%`}
-        />
-
-        {/* 음색 안정성 */}
+        <ResultCard icon={<Slash />}       label="간투사 사용" value={`${result?.features?.filler_count ?? 0}회`} />
+        <ResultCard icon={<PauseCircle />} label="무음 비율"   value={`${((result?.features?.pause_ratio ?? 0) * 100).toFixed(1)}%`} />
         <ResultCard
           icon={<AudioLines />}
           label="음색 안정성"
           value={(() => {
             const { mean, std } = getMFCCAvgTuple(result);
-            return (mean != null && std != null)
-              ? `${mean.toFixed(2)} / ${std.toFixed(2)}`
-              : "N/A";
+            return (mean != null && std != null) ? `${mean.toFixed(2)} / ${std.toFixed(2)}` : "N/A";
           })()}
         />
       </div>
@@ -716,11 +775,7 @@ function ResultSection({ result, audioUrl, audioRef, onReplay, onReload, radarDa
         <div className="mx-auto w-full max-w-[1400px] px-4">
           <div className="border rounded-2xl bg-white/70" style={{ borderColor: '#f1f5f9' }}>
             <div className="p-4 sm:p-6 border-b" style={{ borderColor: '#eef2f7' }}>
-              <SectionHeader
-                number="①"
-                title="발표 특징 분석"
-                hint="그래프 영역 클릭 시 5초 구간 재생"
-              />
+              <SectionHeader number="①" title="발표 특징 분석" hint="그래프 영역 클릭 시 5초 구간 재생" />
             </div>
             <div className="p-4 sm:p-6">
               <ChartsBlock result={result} audioRef={audioRef} />
@@ -739,9 +794,7 @@ function ResultSection({ result, audioUrl, audioRef, onReplay, onReload, radarDa
 
           <div className="grid md:grid-cols-2 gap-8">
             <ElevCard className="p-4 sm:p-5">
-              <h3 className="text-sm font-medium mb-3 text-center" style={{ color: COLOR_PRIMARY }}>
-                항목별 종합 점수 (0~10)
-              </h3>
+              <h3 className="text-sm font-medium mb-3 text-center" style={{ color: COLOR_PRIMARY }}>항목별 종합 점수 (0~10)</h3>
               <div className="w-full h-[300px]">
                 <ResponsiveContainer>
                   <RadarChart data={radarData}>
@@ -756,15 +809,13 @@ function ResultSection({ result, audioUrl, audioRef, onReplay, onReload, radarDa
 
             <ElevCard className="p-5">
               <div className="text-center mb-4">
-                <div className="inline-flex items-center justify-center rounded-xl px-4 py-2 text-white text-lg font-bold"
-                     style={{ backgroundColor: COLOR_SECONDARY }}>
+                <div className="inline-flex items-center justify-center rounded-xl px-4 py-2 text-white text-lg font-bold" style={{ backgroundColor: COLOR_SECONDARY }}>
                   총점 {Number.isFinite(totalScore10) ? totalScore10 : '0.0'} / 10
                 </div>
               </div>
 
               {result?.feedback && (
-                <div className="mb-4 p-3 rounded-md border text-sm"
-                     style={{ background: '#F6F5FF', borderColor: '#E7E4FF', color: '#4B3FA4' }}>
+                <div className="mb-4 p-3 rounded-md border text-sm" style={{ background: '#F6F5FF', borderColor: '#E7E4FF', color: '#4B3FA4' }}>
                   {result.feedback}
                 </div>
               )}
@@ -782,36 +833,27 @@ function ResultSection({ result, audioUrl, audioRef, onReplay, onReload, radarDa
 
       {/* 하단 버튼 */}
       <div className="mt-10 mb-8 flex flex-wrap items-center justify-center gap-3">
-        <button
-          onClick={onReplay}
-          className="w-full sm:w-auto px-6 py-3 text-white font-semibold rounded-lg transition"
-          style={{ backgroundColor: COLOR_ACCENT }}
-        >
+        <button onClick={onReplay} className="w-full sm:w-auto px-6 py-3 text-white font-semibold rounded-lg transition" style={{ backgroundColor: COLOR_ACCENT }}>
           음성 재생
         </button>
 
-        <a
-          href={sttUrl}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="w-full sm:w-auto flex items-center justify-center gap-2 px-6 py-3 text-white font-semibold rounded-lg transition"
-          style={{ backgroundColor: COLOR_PRIMARY }}
-        >
-          <ExternalLink className="w-4 h-4 text-white" />
-          <span>발음 분석 결과</span>
-        </a>
-
         <button
-          onClick={onReload}
-          className="w-full sm:w-auto px-6 py-3 border font-normal rounded-lg hover:bg-gray-100 transition"
-          style={{ borderColor: '#e5e7eb' }}
+          onClick={openSttViewer}
+          className="w-full sm:w-auto px-6 py-3 text-white font-semibold rounded-lg transition"
+          style={{ backgroundColor: COLOR_PRIMARY }}
+          title="발음 분석 결과"
         >
+          발음 분석 결과
+        </button>
+
+        <button onClick={onReload} className="w-full sm:w-auto px-6 py-3 border font-normal rounded-lg hover:bg-gray-100 transition" style={{ borderColor: '#e5e7eb' }}>
           다시 분석하기
         </button>
       </div>
     </div>
   );
 }
+
 
 /* ======================= 카드 ======================= */
 function ResultCard({ icon, label, value }) {
@@ -832,58 +874,75 @@ function ResultCard({ icon, label, value }) {
 }
 
 /* ======================= 차트 블록 ======================= */
+// 종류 리스트 집계 (by_type가 있으면 우선 사용, 없으면 occurrences로 계산)
 function ChartsBlock({ result, audioRef }) {
   const [compact, setCompact] = useState(true);
 
-  const segments = result?.segments?.length ? result.segments : DUMMY_SEGMENTS;
-
-  // ✅ 간투사 occurrences
-  const fillerOccurrences = React.useMemo(() => {
-    return Array.isArray(result?.filler_occurrences)
-      ? result.filler_occurrences
-      : [];
-  }, [result?.filler_occurrences]);
-
-  // 침묵: 기존 로직 유지
-  const silenceIntervals = React.useMemo(() => {
-    if (Array.isArray(result?._globalSilence) && result._globalSilence.length) return result._globalSilence;
-    const list = [];
-    (segments || []).forEach((s) => {
-      const { start: segStart } = parseTimeRange(s.time_range);
-      (s.silence || []).forEach((iv) => {
-        let ss, ee;
-        if (Array.isArray(iv)) { ss = Number(segStart + (iv[0] ?? 0)); ee = Number(segStart + (iv[1] ?? 0)); }
-        else {
-          const sAbs = Number(iv.start_sec ?? iv.start ?? NaN);
-          const eAbs = Number(iv.end_sec   ?? iv.end   ?? NaN);
-          if (Number.isFinite(sAbs) && Number.isFinite(eAbs)) { ss = sAbs; ee = eAbs; }
-          else { ss = Number(segStart + (iv.start_rel ?? 0)); ee = Number(segStart + (iv.end_rel ?? 0)); }
-        }
-        if (Number.isFinite(ss) && Number.isFinite(ee)) list.push({ start_sec: ss, end_sec: ee });
-      });
-    });
-    return list.length ? list : DUMMY_SILENCE;
-  }, [result, segments]);
+  const segments = Array.isArray(result?.segments) && result.segments.length
+    ? result.segments
+    : DUMMY_SEGMENTS;
 
   const pauseRatioPct = Number((result?.features?.pause_ratio ?? 0) * 100);
 
-  // 종류 리스트 집계 (by_type가 있으면 우선 사용, 없으면 occurrences로 계산)
-  const fillerItems = React.useMemo(() => {
-    if (result?.filler_counts_by_type && typeof result.filler_counts_by_type === 'object') {
-      return Object.entries(result.filler_counts_by_type)
-        .map(([word, count]) => ({ word, count: Number(count || 0) }))
-        .sort((a, b) => b.count - a.count)
-        .slice(0, 6);
-    }
+  // ✅ 간투사 종류 리스트: filler_card_items 우선 → by_type → occurrences → segments.fillers
+const fillerItems = (() => {
+  // 0) mapServiceToUi에서 만들어 준 카드용 아이템이 있으면 그대로
+  if (Array.isArray(result?.filler_card_items) && result.filler_card_items.length) {
+    return result.filler_card_items;
+  }
+
+  // 1) by_type (프론트/백엔드 어느 쪽이든)
+  const byType =
+    (result?.filler_counts_by_type && typeof result.filler_counts_by_type === 'object'
+      ? result.filler_counts_by_type
+      : null) ??
+    (result?.filler && typeof result.filler.by_type === 'object'
+      ? result.filler.by_type
+      : null);
+
+  if (byType) {
+    return Object.entries(byType)
+      .map(([word, count]) => ({ word, count: Number(count || 0) }))
+      .filter(it => it.count > 0)
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 10);
+  }
+
+  // 2) occurrences에서 집계
+  let occ = [];
+  if (Array.isArray(result?.filler_occurrences)) {
+    // [{ time_sec, word }]
+    occ = result.filler_occurrences.map(o => ({ word: String(o.word ?? '기타') }));
+  } else if (Array.isArray(result?.filler?.occurrences)) {
+    // [{ type|word, ... }]
+    occ = result.filler.occurrences.map(o => ({ word: String(o.word ?? o.type ?? '기타') }));
+  }
+
+  // 3) 그래도 없으면 세그먼트 안 fillers에서 추출 (["어", start, end] 형태)
+  if (!occ.length && Array.isArray(segments)) {
+    const list = [];
+    segments.forEach(s => {
+      const arr = Array.isArray(s?.fillers) ? s.fillers : [];
+      arr.forEach(tup => {
+        if (Array.isArray(tup) && tup.length) list.push({ word: String(tup[0]) });
+      });
+    });
+    occ = list;
+  }
+
+  if (occ.length) {
     const m = new Map();
-    (fillerOccurrences || []).forEach(f => {
+    occ.forEach(f => {
       const w = String(f.word ?? '기타');
       m.set(w, (m.get(w) || 0) + 1);
     });
     return Array.from(m, ([word, count]) => ({ word, count }))
       .sort((a, b) => b.count - a.count)
-      .slice(0, 6);
-  }, [result?.filler_counts_by_type, fillerOccurrences]);
+      .slice(0, 10);
+  }
+
+  return [];
+})();
 
   return (
     <div className="space-y-4">
@@ -926,6 +985,7 @@ function ChartsBlock({ result, audioRef }) {
     </div>
   );
 }
+
 
 /* ---------- Compact 미니 차트들 ---------- */
 function WPMBarMini({ segments, audioRef }) {
@@ -1199,7 +1259,7 @@ function MFCCOverall({ segments, audioRef, height = 220 }) {
         <div className="bg-white border rounded-md p-2 text-sm">
           <div><b>{`t=${Number(label).toFixed(2)}s`}</b></div>
           <div>🎯 <b>음색(평균)</b> {m?.toFixed?.(2)} — 13개 MFCC의 단순 평균</div>
-          <div className="text:[11px] text-gray-500">그래프 구간을 클릭하면 해당 5초 구간이 재생됩니다.</div>
+          <div className="text-[11px] text-gray-500">그래프 구간을 클릭하면 해당 5초 구간이 재생됩니다.</div>
         </div>
       );
     }
@@ -1240,3 +1300,73 @@ function ElevCard({ className = "", children }) {
     </div>
   );
 }
+
+// ★★★ 같은 페이지에 결과 HTML을 띄우는 가벼운 인라인 뷰어
+function SttInlineViewer() {
+  const [searchParams] = useSearchParams();
+  const stt = searchParams.get('stt');
+  const urlParam = searchParams.get('url') || "";
+  const [html, setHtml] = useState("");
+  const [error, setError] = useState("");
+
+  let fetchPath = urlParam;
+  if (fetchPath.startsWith("http://localhost:8000")) {
+    fetchPath = fetchPath.replace("http://localhost:8000", "");
+  } else if (fetchPath.startsWith("https://localhost:8000")) {
+    fetchPath = fetchPath.replace("https://localhost:8000", "");
+  }
+
+  useEffect(() => {
+    if (stt !== '1') return;
+    if (!fetchPath) {
+      setError("표시할 STT 결과 URL이 없습니다.");
+      return;
+    }
+    (async () => {
+      try {
+        const res = await fetch(fetchPath, { credentials: "omit" });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        let text = await res.text();
+        text = text
+          .replace(/'([^']+)'/g, "$1")
+          .replace(/\[\s*/g, "")
+          .replace(/\s*\]/g, "")
+          .replace(/,\s*/g, " ")
+          .replace(/\s{2,}/g, " ");
+        setHtml(text);
+      } catch (e) {
+        setError(`결과를 불러오지 못했어요: ${e.message}`);
+      }
+    })();
+  }, [stt, fetchPath]);
+
+  if (stt !== '1') return null;
+
+  return (
+    <section id="stt-viewer" className="mt-6 -mx-4 sm:mx-0">
+      <div className="border rounded-2xl bg-white p-4 sm:p-6">
+        <h3 className="text-base font-semibold mb-3">발음 분석 결과</h3>
+
+        {error ? (
+          <div className="p-3 rounded-md bg-red-50 border border-red-200 text-sm text-red-700">{error}</div>
+        ) : !html ? (
+          <div className="text-gray-600">불러오는 중…</div>
+        ) : (
+          <>
+            <iframe
+              title="STT Result (cleaned)"
+              srcDoc={html}
+              className="w-full h-[70vh] border rounded-lg"
+            />
+            {/* 안내 문구 2줄 (iframe 아래) */}
+            <div className="mt-3 text-xs text-gray-600 leading-5">
+              <div>[Original Script] 사용자가 업로드한 발표 원고</div>
+              <div>[STT Result] 실제 발화를 음성 인식한 결과</div>
+            </div>
+          </>
+        )}
+      </div>
+    </section>
+  );
+}
+

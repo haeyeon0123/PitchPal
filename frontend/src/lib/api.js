@@ -23,6 +23,15 @@ export const api = axios.create({
   withCredentials: false,
 });
 
+// 선택: 업로드+진행률 포함한 분석 호출 래퍼
+export async function analyzeVoice(formData, onUploadProgress) {
+  const res = await api.post('/analyze-voice', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    onUploadProgress,
+  });
+  return res.data;
+}
+
 // 공통 에러 메시지 정규화
 api.interceptors.response.use(
   (res) => res,

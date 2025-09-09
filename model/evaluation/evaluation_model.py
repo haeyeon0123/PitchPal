@@ -1,13 +1,22 @@
-import os
+import os, sys
+from pathlib import Path
 from typing import Optional, Tuple, Dict, List
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))  # PitchPal 루트 추가
 
 import numpy as np
 import pandas as pd
+import time
 import joblib
+import json
+from pathlib import Path
 from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import KMeans
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.multioutput import MultiOutputRegressor
+
+from model.speech.core.speech_analysis import analyze_speech
+from model.speech.core.stt_pronunciation import load_whisper_model
 
 DEFAULT_MODEL_PATH = "model/evaluation"
 DEFAULT_DATA_PATH = "data/PitchPal_survey2.csv"
@@ -99,9 +108,9 @@ class SpeechEvaluator:
         scores = np.clip(scores, 0.0, 10.0)
         return scores
 
-    def predict(self, input_features: pd.DataFrame) -> Tuple[pd.DataFrame, np.ndarray]:
+    def predict_from_features(self, input_features: pd.DataFrame, save_path: str = "model/evaluation/results/predicted_scores.json") -> Tuple[pd.DataFrame, np.ndarray]:
         """
-        입력 피처로부터 평가 점수 예측
+        입력 피처로부터 평가 점수 예측 + JSON 저장
         """
         X_input = self.scaler.transform(input_features)
         cluster_ids = self.kmeans.predict(X_input)
@@ -115,13 +124,27 @@ class SpeechEvaluator:
             pred = model.predict(row[np.newaxis, :])[0]
             predictions.append(pred)
 
+        # 원래 예측값
         raw_df = pd.DataFrame(predictions, columns=self.target_columns)
 
+        # 점수화된 결과
         scored_df = pd.DataFrame(index=raw_df.index)
         for col in self.target_columns:
             scored_df[col] = self._score_with_penalty(col, raw_df[col].values)
 
         scored_df['사용된 클러스터'] = cluster_ids
+
+        # JSON 저장
+        result_json = {
+            "scores": scored_df.to_dict(orient="records"),
+            "cluster_ids": cluster_ids.tolist()
+        }
+
+        save_path = Path(save_path)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(save_path, "w", encoding="utf-8") as f:
+            json.dump(result_json, f, ensure_ascii=False, indent=2)
+
         return scored_df, (cluster_ids[0] if len(cluster_ids) == 1 else cluster_ids)
 
     def save_model(self, path: str = DEFAULT_MODEL_PATH):
@@ -151,7 +174,7 @@ class SpeechEvaluator:
 
 
 # === 학습 및 저장 예시 ===
-evaluator = SpeechEvaluator()
-evaluator.fit()  # 기본 CSV 사용
-evaluator.save_model()
-print("✅ 모델 저장 완료")
+# evaluator = SpeechEvaluator()
+# evaluator.fit()  # 기본 CSV 사용
+# evaluator.save_model()
+# print("✅ 모델 저장 완료")

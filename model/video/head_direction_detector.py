@@ -3,7 +3,7 @@ import cv2, json
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Union
 
-import mediapipe as mp
+from mediapipe.python.solutions.face_mesh import FaceMesh
 import numpy as np
 import pandas as pd
 
@@ -60,13 +60,14 @@ def analyze_head_pitch(
     try:
         fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
         if fps <= 0:
-            raise RuntimeError("❌ FPS 값이 0 또는 비정상입니다.")
+            fps = 30.0
+
         wait_ms = int(1000 / fps) if fps > 0 else 1
 
         dist_coeffs = np.zeros((4, 1))
         head_pose_counts = {"looking up": 0, "looking front": 0, "looking down": 0}
 
-        with mp.solutions.face_mesh.FaceMesh(static_image_mode=False, max_num_faces=1, refine_landmarks=True) as face_mesh:
+        with FaceMesh(static_image_mode=False, max_num_faces=1, refine_landmarks=True) as face_mesh:
             records: List[Dict[str, Any]] = [] if return_records else None
             frame_idx = -1
             processed = 0

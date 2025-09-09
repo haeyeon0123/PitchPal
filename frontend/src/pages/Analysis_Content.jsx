@@ -174,42 +174,67 @@ export default function Analysis_Content() {
       }
 
       // 1) 작업 시작
-      const startRes = await axios.post(`${API_BASE}/content/start`, { script: scriptText });
-      const jobId = startRes && startRes.data && startRes.data.job_id;
-      if (!jobId) throw new Error('job_id를 받지 못했습니다.');
+  const startRes = await axios.post(
+    `${API_BASE}/content/start`,
+    { script: scriptText },
+    { headers: { 'Content-Type': 'application/json' } }
+  );
+  const jobId = String(startRes?.data?.job_id ?? '').trim();
+  if (!jobId) throw new Error('job_id를 받지 못했습니다.');
+  // 디버그가 필요하면 주석 해제
+  // console.log('[content] jobId =', jobId);
 
       // 2) 진행률 폴링
-      await new Promise((resolve, reject) => {
-        const startedAt = Date.now();
-        pollId = setInterval(async () => {
-          try {
-            const resp = await axios.get(`${API_BASE}/content/progress/${jobId}`);
-            const p = resp.data;
-            if (typeof p.progress === 'number') setProgress(p.progress);
-            if (p.message) setProgressMessage(p.message);
+  await new Promise((resolve, reject) => {
+    const startedAt = Date.now();
+    let attempts404 = 0;
 
-            if (p.status === 'error') {
-              clearInterval(pollId); pollId = null;
-              reject(new Error(p.message || '서버 에러'));
-              return;
-            }
-            if (p.status === 'done' && (p.progress ?? 0) >= 100) {
-              clearInterval(pollId); pollId = null;
-              resolve(null);
-              return;
-            }
+    // 첫 폴링 전 아주 짧게 대기 (서버 딕셔너리 반영 지연 대비)
+    const firstDelay = setTimeout(() => {
+      pollId = setInterval(async () => {
+        try {
+          const resp = await axios.get(
+            `${API_BASE}/content/progress/${encodeURIComponent(jobId)}`
+          );
+          const p = resp.data || {};
+          if (typeof p.progress === 'number') setProgress(p.progress);
+          if (p.message) setProgressMessage(p.message);
 
-            // 안전장치: 10분 초과 시 중단
-            if (Date.now() - startedAt > 10 * 60 * 1000) {
-              clearInterval(pollId); pollId = null;
-              reject(new Error('타임아웃(10분)'));
-            }
-          } catch (e) {
+          if (p.status === 'error') {
             clearInterval(pollId); pollId = null;
-            reject(e);
+            return reject(new Error(p.message || '서버 에러'));
           }
-        }, 500);
-      });
+          if (p.status === 'done' && (p.progress ?? 0) >= 100) {
+            clearInterval(pollId); pollId = null;
+            return resolve(null);
+          }
+
+          // 10분 초과 안전장치
+          if (Date.now() - startedAt > 10 * 60 * 1000) {
+            clearInterval(pollId); pollId = null;
+            return reject(new Error('타임아웃(10분)'));
+          }
+        } catch (err) {
+          // 초반 404는 짧게 재시도 (레이스 컨디션)
+          const status = err?.response?.status;
+          if (status === 404 && attempts404 < 8) {
+            attempts404++;
+            // 약한 backoff: 300ms 대기 후 다음 틱에서 재시도
+            return;
+          }
+          clearInterval(pollId); pollId = null;
+          return reject(err);
+        }
+      }, 500);
+    }, 250);
+
+    // 타임아웃 방지: startDelay도 정리
+    const clearAll = () => {
+      try { clearTimeout(firstDelay); } catch {}
+      try { if (pollId) clearInterval(pollId); } catch {}
+      pollId = null;
+    };
+  });
 
       // 3) 결과 조회
       const { data } = await axios.get(`${API_BASE}/content/result/${jobId}`);
@@ -226,8 +251,16 @@ export default function Analysis_Content() {
         setHighlightedHtml('');
       }
 
-      // ✅ AI 내용 피드백 복구
-      setFeedbackText((data && data.feedback_text) || '');
+      // ✅ AI 분석 피드백 정규화(기능코드 수정 없이도 동작)
+      const fb =
+        // 표준 우선
+        (data && data.feedback_text) ??
+        // 기능코드가 content_feedback.feedback에 넣는 경우
+        (data && data.content_feedback && data.content_feedback.feedback) ??
+        // 그냥 feedback 키로 오는 경우 (string 또는 string[])
+        (Array.isArray(data?.feedback) ? data.feedback.join('\n') : data?.feedback) ??
+        '';
+      setFeedbackText(String(fb).trim());
 
       // ✅ 점수 반영 (빈 객체면 null 처리)
       const s = data && data.scores;
@@ -462,22 +495,44 @@ export default function Analysis_Content() {
             </div>
           </section>
 
-          {/* ✅ AI 내용 피드백 */}
-          {feedbackText && (
-            <section className="rounded-lg border bg-white">
-              <div className="flex items-center justify-between p-4">
-                <div className="flex items-center gap-2">
-                  <Wand2 className="w-5 h-5 text-gray-500" />
-                  <h4 className="font-semibold">AI 내용 피드백</h4>
-                </div>
+          {/* ✅ AI 분석 피드백 (항상 표시) */}
+          <section className="rounded-lg border bg-white">
+            <div className="flex items-center justify-between p-4">
+              <div className="flex items-center gap-2">
+                <Wand2 className="w-5 h-5 text-gray-500" />
+                <h4 className="font-semibold">AI 내용 피드백</h4>
               </div>
-              <div className="px-4 pb-6">
-                <div className="p-4 rounded-md border bg-white text-sm whitespace-pre-wrap leading-6 font-sans">
-                  {feedbackText}
+            </div>
+            <div className="px-4 pb-6">
+              {feedbackText ? (
+                <ul className="p-4 rounded-md border bg-white text-sm leading-6 font-sans space-y-2">
+                  {String(feedbackText)
+                    .split(/\r?\n/)
+                    .filter(Boolean)
+                    .map((line, i) => {
+                      // 🔧 앞뒤 따옴표·인코딩(&apos;, &#39;) 제거
+                      const cleanLine = line
+                        .replace(/^\s*-\s*/, '')
+                        .replace(/^['"`“”‘’‛❛❜＇]+/, '')   // 앞쪽 따옴표류 제거
+                        .replace(/['"`“”‘’‛❛❜＇]+$/, '')   // 뒤쪽 따옴표류 제거
+                        .replace(/^(&apos;|&#39;)+/, '')   // HTML 엔티티 제거 (앞)
+                        .replace(/(&apos;|&#39;)+$/, '');  // HTML 엔티티 제거 (뒤)
+
+                      return (
+                        <li key={i} className="flex items-start gap-2">
+                          <span className="mt-[6px] w-1.5 h-1.5 rounded-full bg-gray-400 inline-block" />
+                          <span>{cleanLine}</span>
+                        </li>
+                      );
+                    })}
+                </ul>
+              ) : (
+                <div className="p-4 rounded-md border bg-white text-sm text-gray-500">
+                  표시할 피드백이 없습니다.
                 </div>
-              </div>
-            </section>
-          )}
+              )}
+            </div>
+          </section>
 
           {/* 하단 액션 */}
           <div className="flex flex-wrap items-center gap-3">

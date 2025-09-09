@@ -3,7 +3,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple, Union
 
-import mediapipe as mp
+# from mediapipe.python.solutions.face_mesh 만 쓰기 (tasks 불러오지 않음)
+from mediapipe.python.solutions.face_mesh import FaceMesh
+
 import pandas as pd
 
 # ===== Utils =====
@@ -48,19 +50,15 @@ def analyze_eye_blink(
     *,
     ear_threshold: float = DEFAULT_EAR_THRESHOLD,
     closed_frames: int = DEFAULT_CLOSED_FRAMES,
-    frame_stride: int = 1,           # e.g., 2면 1프레임 건너뜀
-    max_frames: Optional[int] = None, # 최대 처리 프레임 수 제한
-    save_raw: bool = True,            # 프레임별 결과 JSON 저장
-    save_summary: bool = True,        # 요약 JSON 저장
+    frame_stride: int = 1,
+    max_frames: Optional[int] = None,
+    save_raw: bool = True,
+    save_summary: bool = True,
     output_dir: Union[str, Path] = "model/video",
     raw_filename: str = "blink_data.json",
     summary_filename: str = "eye_blink_analysis_summary.json",
-    return_records: bool = True       # 메모리로 결과 리스트 반환 여부
+    return_records: bool = True
 ) -> Dict[str, Any]:
-    """
-    영상에서 EAR 기반 깜빡임을 감지하고 결과를 파일로 저장/반환합니다.
-    메모리 사용을 줄이려면 return_records=False 로 설정하세요.
-    """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -71,20 +69,20 @@ def analyze_eye_blink(
     try:
         fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
         if fps <= 0:
-            raise RuntimeError("❌ FPS 값이 0 또는 비정상입니다.")
+            fps = 30.0  # 일부 영상에서 0이 나오는 문제 폴백
 
         wait_time_ms = int(1000 / fps) if fps > 0 else 1
 
-        # MediaPipe는 with 컨텍스트로 관리 → close() 자동 호출(메모리 반환)
-        with mp.solutions.face_mesh.FaceMesh(max_num_faces=1) as face_mesh:
+        with FaceMesh(max_num_faces=1) as face_mesh:
+
             blink_count = 0
             frame_idx = -1
             frame_counter = 0
             start_time = time.time()
 
             records: List[Dict[str, Any]] = [] if return_records else None
-
             processed = 0
+
             while True:
                 ret, frame = cap.read()
                 if not ret:
@@ -122,7 +120,6 @@ def analyze_eye_blink(
                             blink_count += 1
                         frame_counter = 0
 
-                # 기록(메모리 절약 필요 시 끄기)
                 if return_records:
                     records.append({
                         "frame": int(frame_idx),
@@ -130,7 +127,6 @@ def analyze_eye_blink(
                         "blink": bool(blink),
                     })
 
-                # UI 이벤트 루프 (headless 환경이면 의미 없음)
                 if cv2.waitKey(wait_time_ms) & 0xFF == ord('q'):
                     break
 
@@ -151,22 +147,17 @@ def analyze_eye_blink(
             "눈 깜빡임 해석": blink_interpretation
         }
 
-        # 저장(옵션)
         raw_path = None
         summary_path = None
-
         if save_raw and return_records:
-            # DataFrame으로 저장 (orient="records")
             df = pd.DataFrame(records)
             raw_path = output_dir / raw_filename
             df.to_json(raw_path, orient="records", force_ascii=False, indent=4)
-
         if save_summary:
             summary_path = output_dir / summary_filename
             with open(summary_path, "w", encoding="utf-8") as f:
                 json.dump(summary, f, ensure_ascii=False, indent=4)
 
-        # 반환
         return {
             "summary": summary,
             "raw_path": str(raw_path) if raw_path else None,
@@ -175,7 +166,6 @@ def analyze_eye_blink(
         }
 
     finally:
-        # ===== 메모리/리소스 정리 =====
         try:
             cap.release()
         except Exception:

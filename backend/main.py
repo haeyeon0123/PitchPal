@@ -1,12 +1,16 @@
-# backend/main.py — hardened & session‑scoped
+# backend/main.py — hardened & session-scoped
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from typing import Dict, Any, List, Optional, Tuple
 from pathlib import Path
 import shutil, uuid, json, os
+
+# ✅ .env 로드 추가
+from dotenv import load_dotenv
+load_dotenv()
 
 # 진행률/비동기용
 import asyncio
@@ -20,6 +24,7 @@ import time, logging, json as _json, platform
 FRONT_ORIGIN = os.getenv("FRONT_ORIGIN", "http://localhost:3000")
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", 50 * 1024 * 1024))  # 50MB
 ALLOWED_AUDIO_EXT = {".wav", ".mp3", ".m4a"}
+ALLOWED_VIDEO_EXT = {".mp4", ".mov", ".mkv", ".avi", ".webm"}
 ALLOWED_TEXT_EXT  = {".txt"}
 JOB_TTL = timedelta(hours=1)
 
@@ -66,6 +71,18 @@ class stage:
 from model.content.core.spell_checker import run_spellcheck_and_analysis
 from model.speech.core.speech_analysis import analyze_speech
 from model.evaluation.evaluation_model import SpeechEvaluator
+import pandas as pd
+import numpy as np
+
+# ------ 모델 싱글톤 (메모리 캐시) ------
+_EVALUATOR: SpeechEvaluator | None = None
+def _get_evaluator() -> SpeechEvaluator:
+    global _EVALUATOR
+    if _EVALUATOR is None:
+        ev = SpeechEvaluator()
+        ev.load_model("model/evaluation")
+        _EVALUATOR = ev
+    return _EVALUATOR
 
 # -----------------------------------------------------
 # FastAPI 기본 설정
@@ -74,6 +91,7 @@ app = FastAPI(title="PitchPal API")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[FRONT_ORIGIN],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -136,20 +154,40 @@ async def _startup_env_log():
     )
 
 # -----------------------------------------------------
-# 디렉토리 구성
+# 디렉토리 구성 (프로젝트 루트 기준)
 # -----------------------------------------------------
-CONTENT_RESULT_ROOT = Path("model") / "content" / "results"
-CONTENT_RESULT_ROOT.mkdir(parents=True, exist_ok=True)
+ROOT_DIR = Path(__file__).resolve().parents[1]   # PitchPal/
 
-SPEECH_TMP_ROOT    = Path("model") / "speech" / "tmp"
-SPEECH_RESULT_ROOT = Path("model") / "speech" / "results"
+CONTENT_RESULT_ROOT = ROOT_DIR / "model" / "content" / "results"
+SPEECH_TMP_ROOT     = ROOT_DIR / "model" / "speech" / "tmp"
+SPEECH_RESULT_ROOT  = ROOT_DIR / "model" / "speech" / "results"
+VIDEO_UPLOAD_ROOT   = ROOT_DIR / "model" / "video" / "uploads"
+VIDEO_RESULT_ROOT   = ROOT_DIR / "model" / "video" / "results"
+
+CONTENT_RESULT_ROOT.mkdir(parents=True, exist_ok=True)
 SPEECH_TMP_ROOT.mkdir(parents=True, exist_ok=True)
 SPEECH_RESULT_ROOT.mkdir(parents=True, exist_ok=True)
+VIDEO_UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
+VIDEO_RESULT_ROOT.mkdir(parents=True, exist_ok=True)
 
 # 정적 파일 서빙 (세션 디렉터리 포함)
 app.mount("/static", StaticFiles(directory=str(CONTENT_RESULT_ROOT)), name="static")
 app.mount("/static-speech", StaticFiles(directory=str(SPEECH_RESULT_ROOT)), name="static-speech")
 app.mount("/model/speech/results", StaticFiles(directory=str(SPEECH_RESULT_ROOT)), name="speech-results-alias")
+# ★ 영상/모델 전체 접근(프론트 JSON 링크용)
+app.mount("/model", StaticFiles(directory=str(ROOT_DIR / "model")), name="model-root")
+
+# -----------------------------------------------------
+# (NEW) 평가 모델 전역 로드(1회)
+# -----------------------------------------------------
+_EVALUATOR: Optional[SpeechEvaluator] = None
+try:
+    _EVALUATOR = SpeechEvaluator()
+    _EVALUATOR.load_model(str(ROOT_DIR / "model" / "evaluation"))
+    log_json("evaluation_model_loaded", ok=True)
+except Exception as e:
+    _EVALUATOR = None
+    log_json("evaluation_model_loaded", ok=False, error=str(e))
 
 # -----------------------------------------------------
 # 공통 유틸
@@ -186,6 +224,68 @@ def _save_speech_json_scoped(session_id: str, file_name: str, data: dict) -> str
     p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     return f"/model/speech/results/{session_id}/{file_name}"
 
+# -----------------------------------------------------
+# (NEW) 평가 입력 매핑 유틸 (speech_analysis → evaluator 입력)
+# -----------------------------------------------------
+# 학습 시 사용한 피처 순서(evaluation_model.fit의 X열과 동일)
+_FEATURE_ORDER = [
+    '발음 유사도 점수',
+    'MFCC 평균',
+    'MFCC 표준편차',
+    'Pitch 평균 (Hz)',
+    'Pitch 표준편차 (Hz)',
+    'WPM (Words Per Minute)',
+    '무음 구간 비율',
+    '간투사 수'
+]
+
+# 타깃 → UI 점수 키 매핑
+_TARGET_TO_UI = {
+    '발음 정확도': 'pronunciation',
+    '발화 속도':  'speed',
+    '억양':      'intonation',
+    '휴지':      'pause',
+    '간투사':    'filler',
+    # '매끄러움': 'fluency',  # 필요 시 사용
+}
+
+def _agg_mfcc_scalar(x) -> float:
+    """MFCC 평균/표준편차가 벡터이면 평균으로 스칼라화"""
+    try:
+        arr = _np.asarray(x, dtype=float).ravel()
+        return float(_np.mean(arr)) if arr.size else float("nan")
+    except Exception:
+        try:
+            return float(x)
+        except Exception:
+            return float("nan")
+
+def _korean_feats_to_input_df(raw: Dict[str, Any]) -> "pd.DataFrame":
+    import pandas as pd  # 지역 import(기동 가벼움)
+    row = {
+        '발음 유사도 점수': float(raw.get('발음 유사도 점수', _np.nan)),  # ⚠ 학습 단위(0~100 or 0~1) 확인 필요
+        'MFCC 평균':        _agg_mfcc_scalar(raw.get('MFCC 평균', _np.nan)),
+        'MFCC 표준편차':     _agg_mfcc_scalar(raw.get('MFCC 표준편차', _np.nan)),
+        'Pitch 평균 (Hz)':   float(raw.get('Pitch 평균', _np.nan)),
+        'Pitch 표준편차 (Hz)': float(raw.get('Pitch 표준편차', _np.nan)),
+        'WPM (Words Per Minute)': float(raw.get('wpm', _np.nan)),
+        '무음 구간 비율':    float(raw.get('무음 구간 비율', _np.nan)),
+        '간투사 수':         float(raw.get('간투사 수', _np.nan)),
+    }
+    return pd.DataFrame([[row[k] for k in _FEATURE_ORDER]], columns=_FEATURE_ORDER)
+
+def _to_ui_scores(scored_row: Dict[str, float]) -> Dict[str, float]:
+    """evaluator가 만든 0~10 점수 dict → 프론트 키로 변환"""
+    out = {}
+    for k, v in (scored_row or {}).items():
+        ui = _TARGET_TO_UI.get(k)
+        if ui:
+            try:
+                out[ui] = float(v)
+            except Exception:
+                pass
+    return out
+
 
 def _to_float(x, default=0.0):
     try:
@@ -220,7 +320,6 @@ def get_in(d: dict, paths: List[List[str]]) -> Optional[Any]:
 
 
 def build_content_response(payload: Optional[dict] = None) -> Dict[str, Any]:
-    """내용 분석 파이프라인 결과(JSON 파일들)를 표준 응답 스키마로 빌드."""
     data = None
     for cand in [
         "corrected_result.json",
@@ -236,29 +335,52 @@ def build_content_response(payload: Optional[dict] = None) -> Dict[str, Any]:
         data = {}
 
     original_text = get_in(data, [["spell_check", "original_text"], ["original_text"]])
-
     corrected_text = get_in(data, [
         ["spell_check", "corrected_text"],
         ["content_feedback", "content_feedback", "corrected_text"],
         ["content_feedback", "corrected_text"],
         ["corrected_text"],
     ])
-
     highlighted_html = get_in(data, [["spell_check", "highlighted_html"], ["highlighted_html"], ["diff_html"], ["html"]])
 
+    # ---- feedback_text
     feedback_text = get_in(data, [
-        ["content_feedback", "content_feedback", "feedback_text"],
+        ["content_feedback", "content_feedback", "feedback"],
         ["content_feedback", "feedback_text"],
-        ["feedback_text"], ["analysis"], ["comment"],
+        ["content_feedback", "feedback"],
+        ["feedback_text"],
+        ["feedback"],
+        ["analysis"],
+        ["comment"],
     ])
+    if not feedback_text and isinstance(payload, dict):
+        fb2 = get_in(payload, [
+            ["content_feedback", "content_feedback", "feedback"],
+            ["content_feedback", "feedback"],
+            ["feedback_text"],
+            ["feedback"],
+        ])
+        feedback_text = fb2
+    if isinstance(feedback_text, list):
+        feedback_text = "\n".join(f"- {str(x)}" for x in feedback_text)
+    feedback_text = "" if feedback_text is None else str(feedback_text)
 
-    scores_raw = get_in(data, [
+    # ---- scores
+    s_raw = get_in(data, [
         ["content_feedback", "content_feedback", "scores"],
         ["content_feedback", "scores"],
         ["scores"],
     ])
-    scores = scores_raw if isinstance(scores_raw, dict) and len(scores_raw) > 0 else None
+    if not (isinstance(s_raw, dict) and s_raw) and isinstance(payload, dict):
+        s2 = get_in(payload, [
+            ["content_feedback", "content_feedback", "scores"],
+            ["content_feedback", "scores"],
+            ["scores"],
+        ])
+        s_raw = s2
+    scores = s_raw if isinstance(s_raw, dict) and s_raw else None
 
+    # ---- html_url
     html_url: Optional[str] = None
     meta_html = get_in(data, [["meta", "html_url"]])
     if meta_html:
@@ -273,10 +395,10 @@ def build_content_response(payload: Optional[dict] = None) -> Dict[str, Any]:
                     break
         html_url = f"/static/{html_path.name}" if (html_path and html_path.exists()) else None
 
-    # merge meta (file meta <- payload meta 우선)
     meta_from_file = get_in(data, [["meta"]]) or {}
     merged_meta = {**meta_from_file, **(payload or {}).get("meta", {})}
 
+    # ✅ 여기서만 return!
     return {
         "html_url": html_url,
         "original_text": original_text,
@@ -286,6 +408,7 @@ def build_content_response(payload: Optional[dict] = None) -> Dict[str, Any]:
         "scores": scores,
         "meta": merged_meta,
     }
+
 
 # -----------------------------------------------------
 # [음성분석] 응답 스키마 (프론트 표준 매핑)
@@ -346,6 +469,29 @@ def _save_upload_to_tmp(upload: UploadFile, target_dir: Path, fallback_suffix: s
                     raise HTTPException(status_code=413, detail="파일이 너무 큽니다(>50MB).")
                 f.write(chunk)
     return out_path
+
+@app.post("/analyze-video", tags=["video"], summary="(호환) 영상 분석 → 비동기 잡 생성만")
+async def analyze_video_endpoint_compat(background_tasks: BackgroundTasks, video: UploadFile = File(...)):
+    # 기존 프론트가 /analyze-video로 올 때를 위해 job 생성만 하고 즉시 반환
+    # 프론트는 받은 job_id로 /video/jobs/{job_id}/status 를 폴링하고, 완료 시 /video/jobs/{job_id}/result 호출
+    if not video.filename:
+        raise HTTPException(status_code=400, detail="video 파일이 필요합니다.")
+    ext = (Path(video.filename).suffix or ".mp4").lower()
+    if ext not in ALLOWED_VIDEO_EXT:
+        raise HTTPException(status_code=400, detail=f"허용되지 않은 영상 형식: {ext}")
+
+    safe_name = Path(video.filename).name
+    dst = VIDEO_UPLOAD_ROOT / f"{uuid.uuid4().hex}_{safe_name}"
+    with dst.open("wb") as f:
+        shutil.copyfileobj(video.file, f)
+
+    job_id = uuid.uuid4().hex
+    session_id = uuid.uuid4().hex
+    VIDEO_JOBS[job_id] = {"progress": 8, "status": "queued", "message": "대기 중", "result": None, "ts": datetime.utcnow(), "session_id": session_id}
+
+    background_tasks.add_task(_analyze_video_job, job_id, session_id, dst)
+    return {"job_id": job_id, "session_id": session_id, "status": "queued"}
+
 
 
 # -----------------------------------------------------
@@ -492,14 +638,22 @@ def _map_speech_raw_to_response(raw: Dict[str, Any], session_id: str) -> SpeechA
     mfcc_mean = _to_float_list(raw.get("MFCC 평균", raw.get("mfcc_mean")), 13)
     mfcc_std  = _to_float_list(raw.get("MFCC 표준편차", raw.get("mfcc_std")), 13)
 
-    # STT HTML 경로 보정 → 세션 스코프
-    stt_url = raw.get("stt_result_url") or raw.get("stt_results_url")
-    if stt_url:
-        name = Path(str(stt_url)).name
-        stt_url = f"/model/speech/results/{session_id}/{name}"
-    else:
-        candidate = SPEECH_RESULT_ROOT / session_id / "stt_results.html"
-        stt_url = f"/model/speech/results/{session_id}/{candidate.name}" if candidate.exists() else None
+    # --- STT HTML 세션 경로 보장 ---
+    src_html = SPEECH_RESULT_ROOT / "stt_results.html"   # 루트에 생성된 파일
+    dest_dir = SPEECH_RESULT_ROOT / session_id
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest_html = dest_dir / "stt_results.html"
+
+    # 루트에 있으면 세션 경로로 복사
+    if src_html.exists():
+        try:
+            shutil.copyfile(src_html, dest_html)
+        except Exception as e:
+            log_json("stt_copy_error", error=str(e))
+
+    # 프론트에는 항상 세션 경로 반환
+    stt_url = f"/model/speech/results/{session_id}/stt_results.html"
+
 
     segments_norm: List[Segment] = []
     global_fillers: List[Dict[str, Any]] = []
@@ -601,13 +755,41 @@ def _map_speech_raw_to_response(raw: Dict[str, Any], session_id: str) -> SpeechA
     _save_speech_json_scoped(session_id, "segments_results.json", segments_json)
 
     feedback_text = _make_feedback_text(pron_acc, pitch_mean, wpm, filler_total)
-    scores = {
-        "pronunciation": round(pron_acc * 10, 2),
-        "speed": 7.0, "intonation": 6.0,
-        "filler": max(0.0, 10.0 - min(10.0, float(filler_total))),
-        "pause": max(0.0, 10.0 - round(pause_ratio * 10, 2)),
-        "mfcc": 8.0,
-    }
+    # ------ ① ML 평가모델 점수로 대체 ------
+    try:
+        ev = _get_evaluator()
+        # evaluation_model.py가 기대하는 입력 스키마에 맞춰 feature 구성
+        mfcc_std_avg = float(np.mean(mfcc_std)) if mfcc_std else 0.0
+        mfcc_mean_avg = float(np.mean(mfcc_mean)) if mfcc_mean else 0.0
+        feats = pd.DataFrame([{
+            "발음 유사도 점수":          pron_acc * 100.0,  # 모델은 퍼센트 스케일 사용
+            "MFCC 평균":               mfcc_mean_avg,
+            "MFCC 표준편차":           mfcc_std_avg,
+            "Pitch 평균 (Hz)":         pitch_mean,
+            "Pitch 표준편차 (Hz)":     pitch_std,
+            "WPM (Words Per Minute)":  wpm,
+            "무음 구간 비율":            pause_ratio,
+            "간투사 수":                 filler_total,
+        }])
+        pred_df, _cluster = ev.predict_from_features(feats)
+        # 타깃 컬럼: ['발음 정확도','발화 속도','억양','휴지','간투사','매끄러움'] (0~10)
+        scores = {
+            "pronunciation": float(pred_df.get("발음 정확도", pred_df.mean(axis=1)).iloc[0]),
+            "speed":         float(pred_df.get("발화 속도", pred_df.mean(axis=1)).iloc[0]),
+            "intonation":    float(pred_df.get("억양",     pred_df.mean(axis=1)).iloc[0]),
+            "pause":         float(pred_df.get("휴지",     pred_df.mean(axis=1)).iloc[0]),
+            "filler":        float(pred_df.get("간투사",   pred_df.mean(axis=1)).iloc[0]),
+            "mfcc":          float(pred_df.get("매끄러움", pred_df.mean(axis=1)).iloc[0]),
+        }
+    except Exception as _:
+        # ② 실패 시 기존 휴리스틱으로 폴백(서비스 안전)
+        scores = {
+            "pronunciation": round(pron_acc * 10, 2),
+            "speed": 7.0, "intonation": 6.0,
+            "filler": max(0.0, 10.0 - min(10.0, float(filler_total))),
+            "pause": max(0.0, 10.0 - round(pause_ratio * 10, 2)),
+            "mfcc": 8.0,
+        }
 
     return SpeechAnalysisResponse(
         pronunciation_accuracy=pron_acc,
@@ -704,10 +886,229 @@ async def speech_analyze(
 
 
 # -----------------------------------------------------
+# [NEW] 모델 점수 기반 동기 엔드포인트 (/analyze-voice)
+# -----------------------------------------------------
+@app.post("/analyze-voice", tags=["speech"], summary="음성 분석 + 평가모델 점수(0~10) 반환")
+async def analyze_voice_endpoint(
+    audio: UploadFile = File(..., description="음성 파일(.wav/.mp3 등)"),
+    script: UploadFile = File(..., description="대본 텍스트 파일(.txt)"),
+):
+    if not audio.filename or not script.filename:
+        raise HTTPException(status_code=400, detail="audio, script 파일이 모두 필요합니다.")
+    await _ensure_safe_upload(audio, ALLOWED_AUDIO_EXT)
+    await _ensure_safe_upload(script, ALLOWED_TEXT_EXT)
+
+    # 업로드 저장(세션 스코프)
+    session_id = uuid.uuid4().hex
+    audio_path  = _save_upload_to_tmp(audio,  SPEECH_TMP_ROOT, ".wav")
+    script_path = _save_upload_to_tmp(script, SPEECH_TMP_ROOT, ".txt")
+
+    try:
+        # 1) 핵심 분석 실행(speech_analysis.py) — 한글 키 반환
+        with stage("speech_core_analyze", file=audio.filename):
+            raw: Dict[str, Any] = analyze_speech(
+                audio_path=str(audio_path),
+                script_path=str(script_path),
+            )
+            raw["session_id"] = session_id
+
+        # 2) STT HTML 세션 경로 보장(기존 맵퍼와 동일 정책)
+        src_html = SPEECH_RESULT_ROOT / "stt_results.html"
+        dest_dir = SPEECH_RESULT_ROOT / session_id
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest_html = dest_dir / "stt_results.html"
+        if src_html.exists():
+            try:
+                shutil.copyfile(src_html, dest_html)
+            except Exception as e:
+                log_json("stt_copy_error", error=str(e))
+        stt_url = f"/model/speech/results/{session_id}/stt_results.html"
+
+        # 3) 평가 모델 예측(0~10 환산은 evaluator 내부)
+        if _EVALUATOR is None:
+            raise HTTPException(status_code=500, detail="평가 모델이 로드되지 않았습니다.")
+        with stage("eval_build_input"):
+            input_df = _korean_feats_to_input_df(raw)
+        with stage("eval_predict"):
+            scored_df, _cluster = _EVALUATOR.predict_from_features(
+                input_df,
+                save_path=str(ROOT_DIR / "model" / "evaluation" / "results" / "predicted_scores.json")
+            )
+        model_scores = _to_ui_scores(scored_df.iloc[0].to_dict())
+
+        # 4) 응답 스키마(프론트 표준)
+        resp = {
+            "kpis": {
+                "wpm": raw.get("wpm"),
+                "pronunciation_accuracy": raw.get("발음 유사도 점수"),
+                "pause_ratio": raw.get("무음 구간 비율"),
+                "filler_count": raw.get("간투사 수"),
+            },
+            "scores": model_scores,  # ✅ 0~10
+            "features": {
+                "pitch_mean": raw.get("Pitch 평균"),
+                "pitch_std":  raw.get("Pitch 표준편차"),
+                "mfcc_mean":  raw.get("MFCC 평균"),
+                "mfcc_std":   raw.get("MFCC 표준편차"),
+            },
+            "stt_result_url": stt_url,
+            "session_id": session_id,
+        }
+        return JSONResponse(resp)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        log_json("analyze_voice_error", error=str(e))
+        return JSONResponse({"error": str(e)}, status_code=500)
+    finally:
+        # 임시 파일 정리
+        try:
+            if audio_path.exists():  audio_path.unlink()
+            if script_path.exists(): script_path.unlink()
+        except Exception:
+            pass
+
+
+# -----------------------------------------------------
 # [2] NEW 비동기 파이프라인 (start/progress/result)
 # -----------------------------------------------------
 JOBS: Dict[str, Dict[str, Any]] = {}
 SPEECH_JOBS: Dict[str, Dict[str, Any]] = {}
+
+# ===== [2-VIDEO] 비동기 영상 파이프라인 =====
+VIDEO_JOBS: Dict[str, Dict[str, Any]] = {}
+
+def _video_set(job_id: str, **fields):
+    job = VIDEO_JOBS.get(job_id)
+    if not job:
+        return
+    job.update(fields)
+    job["ts"] = datetime.utcnow()
+
+def _ensure_ascii_filename(name: str) -> str:
+    # 한글/공백 문제가 있으면 여기서 정리(선택)
+    return Path(name).name
+
+def _analyze_video_job(job_id: str, session_id: str, src_path: Path):
+    """
+    BackgroundTasks에서 호출되는 동기 함수.
+    무거운 분석은 여기서 실행되고, 진행률은 VIDEO_JOBS에 기록됩니다.
+    """
+    try:
+        _set_status(VIDEO_JOBS, job_id, "running", "작업 시작")
+        _set_progress(VIDEO_JOBS, job_id, 5, "모델/리소스 준비")  # ← 잡 시작 즉시 5%로
+
+
+        # 전처리 단계
+        time.sleep(0.2)
+        _set_progress(VIDEO_JOBS, job_id, 15, "전처리 준비")
+        time.sleep(0.2)
+        _set_progress(VIDEO_JOBS, job_id, 25, "전처리 완료")
+
+        # 분석 세분화 (예: face, blink, pose, emotion 등)
+        _set_progress(VIDEO_JOBS, job_id, 40, "얼굴 검출/랜드마크")
+        time.sleep(0.2)
+        _set_progress(VIDEO_JOBS, job_id, 55, "깜빡임(EAR) 분석")
+        time.sleep(0.2)
+        _set_progress(VIDEO_JOBS, job_id, 70, "머리 자세 분석")
+        time.sleep(0.2)
+        _set_progress(VIDEO_JOBS, job_id, 82, "감정 분류")
+
+        # === 실제 분석 호출 ===
+        from model.video.pipeline import analyze_video as run_pipeline
+        result: Dict[str, Any] = run_pipeline(
+            str(src_path),
+            results_root=str(VIDEO_RESULT_ROOT),
+            session_id=session_id
+        )
+
+        # 매핑/저장 단계
+        _set_progress(VIDEO_JOBS, job_id, 90, "결과 매핑")
+        job_dir = (VIDEO_RESULT_ROOT / session_id)
+        job_dir.mkdir(parents=True, exist_ok=True)
+        out_json = job_dir / "analysis.json"
+        out_json.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        _set_progress(VIDEO_JOBS, job_id, 96, "결과 저장")
+        VIDEO_JOBS[job_id]["result_path"] = str(out_json)
+        VIDEO_JOBS[job_id]["result"] = result
+
+        _set_progress(VIDEO_JOBS, job_id, 100, "완료")
+        _set_status(VIDEO_JOBS, job_id, "done", "완료")
+
+    except Exception as e:
+        traceback.print_exc()
+        _set_status(VIDEO_JOBS, job_id, "error", f"에러: {e}")
+        _set_progress(VIDEO_JOBS, job_id, 100)
+        VIDEO_JOBS[job_id]["result"] = None
+    finally:
+        try:
+            if src_path.exists():
+                src_path.unlink()
+        except Exception:
+            pass
+        _gc_jobs()
+
+@app.post("/video/jobs", tags=["video"], summary="영상 분석 작업 시작(비동기)")
+async def video_start(background_tasks: BackgroundTasks, video: UploadFile = File(...)):
+    if not video.filename:
+        raise HTTPException(status_code=400, detail="video 파일이 필요합니다.")
+    ext = (Path(video.filename).suffix or ".mp4").lower()
+    if ext not in ALLOWED_VIDEO_EXT:
+        raise HTTPException(status_code=400, detail=f"허용되지 않은 영상 형식: {ext}")
+
+    # 업로드 저장
+    safe_name = _ensure_ascii_filename(video.filename)
+    dst = VIDEO_UPLOAD_ROOT / f"{uuid.uuid4().hex}_{safe_name}"
+    with dst.open("wb") as f:
+        shutil.copyfileobj(video.file, f)
+
+    # 잡 생성
+    job_id = uuid.uuid4().hex
+    session_id = uuid.uuid4().hex
+    VIDEO_JOBS[job_id] = {
+        "progress": 0, "status": "queued", "message": "대기 중",
+        "result": None, "ts": datetime.utcnow(), "session_id": session_id
+    }
+
+    # 백그라운드 실행(동기 함수 호출)
+    background_tasks.add_task(_analyze_video_job, job_id, session_id, dst)
+    return {"job_id": job_id, "session_id": session_id, "status": "queued"}
+
+@app.get("/video/jobs/{job_id}/status", tags=["video"], summary="영상 작업 진행률 조회")
+async def video_status(job_id: str):
+    _gc_jobs()
+    job = VIDEO_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="job_id 없음")
+    return {
+        "job_id": job_id,
+        "status": job.get("status", "queued"),
+        "progress": job.get("progress", 0),
+        "message": job.get("message", ""),
+    }
+
+@app.get("/video/jobs/{job_id}/result", tags=["video"], summary="영상 분석 결과 조회")
+async def video_result(job_id: str):
+    _gc_jobs()
+    job = VIDEO_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="job_id 없음")
+    if job["status"] != "done" or not job.get("result_path"):
+        raise HTTPException(status_code=202, detail="아직 처리 중이거나 결과가 없습니다.")
+
+    path = Path(job["result_path"])
+    if not path.exists():
+        raise HTTPException(status_code=500, detail="result file missing")
+
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return {"ready": True, "result": data, "session_id": job.get("session_id")}
+    except Exception:
+        # 파일이 매우 크면 파일 그대로 내려도 됨
+        return FileResponse(path)
+    
 
 
 def _set_progress(job_dict: Dict[str, Dict[str, Any]], job_id: str, value: int, message: str = ""):
@@ -732,11 +1133,12 @@ def _set_status(job_dict: Dict[str, Dict[str, Any]], job_id: str, status: str, m
 
 def _gc_jobs():
     now = datetime.utcnow()
-    for store in (JOBS, SPEECH_JOBS):
+    for store in (JOBS, SPEECH_JOBS, VIDEO_JOBS):   # ★ VIDEO_JOBS 추가
         for k, v in list(store.items()):
             ts = v.get("ts", now)
             if now - ts > JOB_TTL:
                 store.pop(k, None)
+
 
 
 async def _ticker(job_dict: Dict[str, Dict[str, Any]], job_id: str, until: int = 90, step_ms: int = 400):
@@ -875,6 +1277,84 @@ def get_latest_speech_result():
 # -----------------------------------------------------
 # 내용분석(동기 + 비동기)
 # -----------------------------------------------------
+# ---- 내용 분석 비동기 잡 저장소 ----
+CONTENT_JOBS: Dict[str, Dict[str, Any]] = {}
+
+@app.post("/content/start", tags=["content"], summary="내용 분석 작업 시작(비동기)")
+async def content_start(background_tasks: BackgroundTasks, body: Dict[str, Any]):
+    script = (body or {}).get("script", "")
+    if not script or not isinstance(script, str):
+        raise HTTPException(status_code=400, detail="script(텍스트)가 필요합니다.")
+
+    # 임시 스크립트 저장
+    tmp_txt = CONTENT_RESULT_ROOT / f"script_{uuid.uuid4().hex}.txt"
+    tmp_txt.write_text(script, encoding="utf-8")
+
+    job_id = uuid.uuid4().hex
+    CONTENT_JOBS[job_id] = {"progress": 0, "status": "queued", "message": "대기 중", "result": None, "ts": datetime.utcnow()}
+
+    background_tasks.add_task(_run_content_pipeline, job_id, tmp_txt)
+    return {"job_id": job_id, "status": "queued"}
+
+@app.get("/content/progress/{job_id}", tags=["content"], summary="내용 분석 진행률 조회")
+async def content_progress(job_id: str):
+    _gc_jobs()
+    job = CONTENT_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="job_id 없음")
+    return {
+        "job_id": job_id,
+        "progress": job.get("progress", 0),
+        "status": job.get("status", "queued"),
+        "message": job.get("message", ""),
+    }
+
+@app.get("/content/result/{job_id}", tags=["content"], summary="내용 분석 결과 조회")
+async def content_result(job_id: str):
+    _gc_jobs()
+    job = CONTENT_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="job_id 없음")
+    if job["status"] != "done" or not job["result"]:
+        raise HTTPException(status_code=202, detail="아직 처리 중이거나 결과가 없습니다.")
+    return job["result"]
+
+async def _run_content_pipeline(job_id: str, tmp_txt: Path):
+    ticker_task = None
+    try:
+        _set_status(CONTENT_JOBS, job_id, "running", "작업 시작")
+        _set_progress(CONTENT_JOBS, job_id, 5, "입력 저장")
+        ticker_task = asyncio.create_task(_ticker(CONTENT_JOBS, job_id, until=95, step_ms=450))
+
+        loop = asyncio.get_running_loop()
+        async with _ExecSemaphore:
+            with stage("content_pipeline"):
+                _set_progress(CONTENT_JOBS, job_id, 30, "교정/분석 중")
+                payload = await loop.run_in_executor(None, lambda: run_spellcheck_and_analysis(str(tmp_txt)))
+
+            with stage("content_build_response"):
+                _set_progress(CONTENT_JOBS, job_id, 95, "응답 구성")
+                resp = build_content_response(payload)
+                CONTENT_JOBS[job_id]["result"] = resp
+
+        _set_progress(CONTENT_JOBS, job_id, 100, "완료")
+        _set_status(CONTENT_JOBS, job_id, "done", "완료")
+    except Exception as e:
+        traceback.print_exc()
+        _set_status(CONTENT_JOBS, job_id, "error", f"에러: {e}")
+        _set_progress(CONTENT_JOBS, job_id, 100)
+        CONTENT_JOBS[job_id]["result"] = None
+    finally:
+        try:
+            if ticker_task: ticker_task.cancel()
+        except Exception:
+            pass
+        try:
+            if tmp_txt.exists(): tmp_txt.unlink()
+        except Exception:
+            pass
+        _gc_jobs()
+
 @app.post("/content/run", tags=["content"], summary="내용 분석(동기)")
 async def content_run(script: str = Form(...)):
     with stage("content_save_script"):
