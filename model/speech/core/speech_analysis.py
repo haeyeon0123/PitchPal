@@ -12,11 +12,12 @@ from collections import Counter
 import os
 import librosa
 import numpy as np
+import soundfile as sf
 
 from model.speech.core.stt_pronunciation import transcribe_audio, export_differences_to_html, load_whisper_model
 from model.speech.utils.text_utils import evaluate_pronunciation
 from model.speech.core.filler_words import detect_filler_words  
-from model.speech.core.pause_ratio_calculator import calculate_pause_ratio
+from model.speech.core.pause_ratio_calculator import calculate_pause_ratio_from_waveform
 from model.speech.utils.serialize import dump_json
 
 # -----------------------------
@@ -26,10 +27,22 @@ from model.speech.utils.serialize import dump_json
 # 음성 불러오기
 def load_audio(audio_path):
     try:
-        return librosa.load(audio_path, sr=16000)
-    except Exception as e:
-        print(f"❌ 음성 파일 로딩 실패: {e}")
-        return None, None
+        # sf.read가 보통 더 빠르며 확실합니다.
+        y, sr = sf.read(audio_path, dtype='float32', always_2d=False)
+        if y.ndim == 2:
+            y = np.mean(y, axis=1)  # mono
+        if sr != 16000:
+            y = librosa.resample(y, orig_sr=sr, target_sr=16000)
+            sr = 16000
+        return y, sr
+    except Exception:
+        # 백업: librosa.load
+        try:
+            y, sr = librosa.load(audio_path, sr=16000, mono=True, dtype=np.float32)
+            return y, sr
+        except Exception as e:
+            print(f"❌ 음성 파일 로딩 실패: {e}")
+            return None, None
     
 def read_text(path: str) -> str:
     with open(path, "r", encoding="utf-8") as f:
@@ -173,11 +186,15 @@ def analyze_speech(audio_path: str, script_path: str, model=None, segment_durati
     audio_segments = segment_audio(audio, sr, segment_duration=segment_duration)
     segment_times = [(st, et) for (_, st, et) in audio_segments]
 
+    # === NEW: frame-wise 한 번만 계산
+    mfcc, f0, frame_t = compute_framewise_features(audio, sr, n_mfcc=13, n_fft=1024, hop_length=512)
+    per_seg_stats = agg_segment_features_from_frames(mfcc, f0, frame_t, segment_times)
+
     # 5) 세그먼트별 STT 텍스트 매핑
     stt_per_seg = match_stt_to_segments(whisper_segments, segment_times)
 
     # 6) Global metrics
-    pause_ratio = float(calculate_pause_ratio(audio_path))
+    pause_ratio = float(calculate_pause_ratio_from_waveform(audio, sr))
     pronunciation_accuracy = float(evaluate_pronunciation(script_text, stt_text))
 
     # 7) 간투사(전역)
@@ -190,64 +207,66 @@ def analyze_speech(audio_path: str, script_path: str, model=None, segment_durati
     # 8) 간투사를 세그먼트별로 버킷팅
     fillers_per_seg = bucket_occurrences_by_segments(filler_occurrences, segment_times)
 
-    # 9) 구간별 피처 저장
+    # 9) 구간별 피처 저장 — 여기서 mfcc/pitch는 위에서 계산된 per_seg_stats 사용
     # 세그먼트 피처 계산 + 전역 통계 누적
     segment_features = []
-    mfcc_means, mfcc_stds = [], []
-    pitch_means, pitch_stds = [], []
     wpms = []
-
     for i, (audio_seg, st, et) in enumerate(audio_segments):
         seg_text = stt_per_seg[i]
         seg_dur = max(1e-6, (et - st))
-
-        # features
-        mfcc_mean, mfcc_std = extract_mfcc(audio_seg, sr)
-        pitch_mean, pitch_std = extract_pitch(audio_seg, sr)
         wpm = estimate_wpm(seg_text, seg_dur)
-        silences = silence_intervals_in_segment(audio_seg, sr)
-
-        # 전체 평균용 리스트
-        mfcc_means.append(mfcc_mean)
-        mfcc_stds.append(mfcc_std)
-        pitch_means.append(pitch_mean)
-        pitch_stds.append(pitch_std)
         wpms.append(wpm)
 
-        # build segment dict
+        silences = silence_intervals_in_segment(audio_seg, sr)   # 이건 seg 파형 필요, 그대로 유지
+
+        seg_stat = per_seg_stats[i]
         segment_features.append({
             "time_range": f"{st:05.2f}-{et:05.2f}",
             "stt_text": seg_text,
             "wpm": float(wpm),
-            "pitch_mean": float(pitch_mean),
-            "mfcc_mean": mfcc_mean.tolist(),
+            "pitch_mean": seg_stat["pitch_mean"],
+            "pitch_std":  seg_stat["pitch_std"],
+            "mfcc_mean": seg_stat["mfcc_mean"],
+            "mfcc_std":  seg_stat["mfcc_std"],
             "silence": [(float(s), float(e)) for (s, e) in silences],
             "fillers": [(w, float(s), float(e)) for (w, s, e) in (fillers_per_seg[i] if i < len(fillers_per_seg) else [])],
         })
 
-    # 10) 전체 평균 계산
-    avg_mfcc_mean = np.mean(np.stack(mfcc_means, axis=0), axis=0).tolist() if mfcc_means else [0.0]*13
-    avg_mfcc_std  = np.mean(np.stack(mfcc_stds,  axis=0), axis=0).tolist() if mfcc_stds  else [0.0]*13
-    avg_pitch_mean = float(np.mean(pitch_means)) if pitch_means else 0.0
-    avg_pitch_std  = float(np.mean(pitch_stds))  if pitch_stds  else 0.0
+    # 10) 전체 평균 계산 (frame-wise 집계 기반)
+    if per_seg_stats:
+        mfcc_mean_mat = np.array([s["mfcc_mean"] for s in per_seg_stats], dtype=np.float32)  # (S, 13)
+        mfcc_std_mat  = np.array([s["mfcc_std"]  for s in per_seg_stats], dtype=np.float32)  # (S, 13)
+        avg_mfcc_mean = mfcc_mean_mat.mean(axis=0).tolist()
+        avg_mfcc_std  = mfcc_std_mat.mean(axis=0).tolist()
+        avg_pitch_mean = float(np.mean([s["pitch_mean"] for s in per_seg_stats]))
+        avg_pitch_std  = float(np.mean([s["pitch_std"]  for s in per_seg_stats]))
+    else:
+        avg_mfcc_mean = [0.0] * 13
+        avg_mfcc_std  = [0.0] * 13
+        avg_pitch_mean = 0.0
+        avg_pitch_std  = 0.0
+
     avg_wpm = float(np.mean(wpms)) if wpms else 0.0
 
     # 11) STT vs Script 비교 결과 HTML 저장
     os.makedirs("model/speech/results", exist_ok=True)
-    stt_html_path = export_differences_to_html(script_text, stt_text, output_path="model/speech/results/stt_results.html")
+    stt_html_path = export_differences_to_html(
+        script_text, stt_text, output_path="model/speech/results/stt_results.html"
+    )
     stt_result_url = "/" + stt_html_path if not stt_html_path.startswith("/") else stt_html_path
 
-    # 12) 결과 출력(전역 평균 기준으로 출력값 수정)
+    # 12) 결과 출력(전역 평균 기준)
     print(f"\n✅ 발음 유사도 점수: {pronunciation_accuracy * 100:.2f}%")
     print(f"✅ MFCC 평균: {avg_mfcc_mean}")
-    print(f"✅ MFCC 표준편차: {mfcc_std}")              # ← 전역 평균 사용
+    print(f"✅ MFCC 표준편차: {avg_mfcc_std}")
     print(f"✅ Pitch 평균: {avg_pitch_mean:.2f} Hz")
-    print(f"✅ Pitch 표준편차: {pitch_std:.2f} Hz")     # ← 전역 평균 사용
+    print(f"✅ Pitch 표준편차: {avg_pitch_std:.2f} Hz")
     print(f"✅ Words Per Minute(WPM): {avg_wpm:.2f}")
     print(f"✅ 무음 구간 비율: {pause_ratio:.2f}")
     print(f"✅ 간투사 수: {filler_count}회")
     if filler_count > 0:
         print(f"✅ 감지된 간투사: {filler_occurrences}")
+
 
     # 13) 발표 평가 요약
     print("\n[발표 평가]")
@@ -281,3 +300,64 @@ def analyze_speech(audio_path: str, script_path: str, model=None, segment_durati
 def save_analysis_result_json(result: dict, output_path: str):
     """최종 분석 결과를 공통 직렬화 유틸로 저장"""
     dump_json(result, output_path, ensure_ascii=False, indent=2)
+
+
+
+# speech_analysis.py 일부 추가/교체 코드
+
+def frame_times(n_frames: int, hop_length: int, sr: int):
+    # 각 프레임의 중앙 시각(초)
+    return np.arange(n_frames) * (hop_length / sr)
+
+def compute_framewise_features(y: np.ndarray, sr: int, n_mfcc: int = 13, n_fft: int = 1024, hop_length: int = 512):
+    """
+    전체 신호를 프레임 단위로 한 번만 계산:
+    - MFCC: (n_mfcc, T)
+    - f0:   (T,) using librosa.yin
+    """
+    # Librosa는 float32가 빠릅니다.
+    if y.dtype != np.float32:
+        y = y.astype(np.float32, copy=False)
+
+    mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=n_mfcc, n_fft=n_fft, hop_length=hop_length)  # (n_mfcc, T)
+    # piptrack 대신 yin (보통 더 빠르고 안정적)
+    f0 = librosa.yin(y, fmin=50, fmax=500, sr=sr, frame_length=n_fft, hop_length=hop_length)    # (T,)
+
+    t = frame_times(mfcc.shape[1], hop_length, sr)  # (T,)
+    return mfcc, f0, t
+
+def agg_segment_features_from_frames(mfcc, f0, t, seg_times):
+    """
+    seg_times: [(start_sec, end_sec), ...]
+    반환: per-seg dict 리스트 (mfcc_mean/list, mfcc_std/list, pitch_mean/std)
+    """
+    per_seg = []
+    for (ss, ee) in seg_times:
+        idx = np.where((t >= ss) & (t < ee))[0]
+        if idx.size == 0:
+            # 프레임이 하나도 없으면 0으로 채움
+            mfcc_mean = np.zeros(mfcc.shape[0], dtype=np.float32)
+            mfcc_std  = np.zeros(mfcc.shape[0], dtype=np.float32)
+            pitch_mean = 0.0
+            pitch_std  = 0.0
+        else:
+            mfcc_seg = mfcc[:, idx]                   # (n_mfcc, K)
+            mfcc_mean = mfcc_seg.mean(axis=1)
+            mfcc_std  = mfcc_seg.std(axis=1)
+            f0_seg = f0[idx]
+            # yin은 unvoiced에 nan이 있을 수 있어요 → 안전 처리
+            f0_seg = f0_seg[np.isfinite(f0_seg)]
+            if f0_seg.size == 0:
+                pitch_mean = 0.0
+                pitch_std  = 0.0
+            else:
+                pitch_mean = float(np.mean(f0_seg))
+                pitch_std  = float(np.std(f0_seg))
+
+        per_seg.append({
+            "mfcc_mean": mfcc_mean.tolist(),
+            "mfcc_std":  mfcc_std.tolist(),
+            "pitch_mean": float(pitch_mean),
+            "pitch_std":  float(pitch_std),
+        })
+    return per_seg

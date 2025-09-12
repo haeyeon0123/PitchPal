@@ -18,6 +18,17 @@ from model.speech.utils.text_utils import tokenize, get_diff_indices
 _MODEL = None
 
 def load_whisper_model(size: str = "small", device: str = "cpu", compute_type: str = "int8"):
+    # CUDA가 있으면 자동 전환(없으면 cpu 유지)
+    try:
+        import torch
+        if torch.cuda.is_available():
+            device = "cuda"
+            compute_type = "float16"  # GPU 권장
+        else:
+            device = device or "cpu"
+    except Exception:
+        pass
+
     global _MODEL
     if _MODEL is None:
         _MODEL = WhisperModel(size, device=device, compute_type=compute_type)
@@ -43,6 +54,18 @@ def print_word_level_output(audio_path, model):
 # -----------------------------
 def transcribe_audio(audio_path: str, model: WhisperModel = None, **kwargs):
     model = model or load_whisper_model()
+
+    default_kwargs = dict(
+        word_timestamps=False,   # 기본은 OFF (필요한 경우만 ON)
+        vad_filter=True,
+        beam_size=1,             # Greedy
+        temperature=0.0,
+        no_speech_threshold=0.6,
+        condition_on_previous_text=False,
+        language="ko"            # 확정 언어 지정이 빠름
+    )
+    for k, v in default_kwargs.items():
+        kwargs.setdefault(k, v)
 
     # ensure word timestamps enabled by default
     if "word_timestamps" not in kwargs:
