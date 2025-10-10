@@ -41,20 +41,47 @@ const parseTimeRange = (rangeStr) => {
   return { start: Math.min(s || 0, e || 0), end: Math.max(s || 0, e || 0) };
 };
 
-const playSegment = (audioRef, startSec, endSec) => {
-  const audio = audioRef?.current;
-  if (!audio) return;
-  audio.pause();
-  audio.currentTime = Math.max(0, startSec);
-  audio.play();
-  const handler = () => {
-    if (audio.currentTime >= endSec) {
-      audio.pause();
-      audio.removeEventListener('timeupdate', handler);
+// 안정적인 playSegment (Chrome에서 "play() interrupted" 방지)
+const playSegment = (() => {
+  let lastPlayPromise = null;
+  let stopTimer = null;
+
+  return async (audioRef, startSec, endSec) => {
+    const audio = audioRef?.current;
+    if (!audio) return;
+
+    // 이전 구간 정지
+    if (stopTimer) clearTimeout(stopTimer);
+    audio.pause();
+
+    // 구간 이동
+    audio.currentTime = Math.max(0, startSec);
+
+    // 이전 play()가 남아 있다면 안전하게 catch
+    if (lastPlayPromise) {
+      try { await lastPlayPromise; } catch (_) {}
     }
+
+    try {
+      // 실제 재생 시도
+      lastPlayPromise = audio.play();
+      await lastPlayPromise;
+    } catch (err) {
+      // AbortError나 NotAllowedError는 무시 (Chrome에서 정상 동작)
+      if (err?.name !== "AbortError" && err?.name !== "NotAllowedError") {
+        console.warn("Audio play error:", err);
+      }
+      return;
+    }
+
+    // 구간 끝에서 자동 정지
+    const dur = Math.max(0, (endSec - startSec) * 1000);
+    stopTimer = setTimeout(() => {
+      try { audio.pause(); } catch (_) {}
+    }, dur);
   };
-  audio.addEventListener('timeupdate', handler);
-};
+})();
+
 
 // 5초 단위 더미 데이터
 const DUMMY_SEGMENTS = Array.from({ length: 12 }, (_, i) => ({
